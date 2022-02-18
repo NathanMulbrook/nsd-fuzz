@@ -22,3 +22,6 @@ clang -c fuzzer.c -pthread -fsanitize=fuzzer-no-link -Ofast -march=native -o fuz
 make install  -j 34
 cp ../nsd.conf run/etc/nsd/nsd.conf
 cp ../*.zone run/etc/nsd/
+./run/sbin/nsd-control-setup
+mkdir run/sbin/corpus
+cp ../dict.txt run/sbin/
