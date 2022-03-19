@@ -191,6 +191,7 @@ build_software() {
     build_dir="$build_dir_default"
     port=$(($BUILD_CONFIG + 3500))
     portsec=$(($BUILD_CONFIG + 3550))
+    rm -rf $run_dir
     rm $run_dir/sbin/nsd
     rm -rf $build_dir
 
