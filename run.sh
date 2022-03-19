@@ -32,28 +32,28 @@ config_build()
     case "${BUILD_CONFIG}" in
 
       1)
-        config_flags="-d 32 "
+        config_flags="-d"
       ;;
       2)
-        config_flags="-d ALL"
+        config_flags="-d"
        ;;
              3)
-        config_flags="-d parsing+errors"
+        config_flags="-d"
        ;;
              4)
-        config_flags="-d trace"
+        config_flags=""
        ;;
              5)
-        config_flags="-d 4"
+        config_flags=""
        ;;
              6)
-        config_flags="-d parsing+errors"
+        config_flags=""
        ;;
              7)
-        config_flags="-d ALL"
+        config_flags=""
        ;;
              8)
-        config_flags="-d 8"
+        config_flags=""
        ;;
              9)
         config_flags=""
@@ -62,47 +62,47 @@ config_build()
         config_flags=""
        ;;
                     11)
-        config_flags="-d 16"
+        config_flags=""
        ;;
              12)
-        config_flags="-d 256"
+        config_flags=""
        ;;
                     13)
-        config_flags="-d 32"
+        config_flags=""
        ;;
              14)
-        config_flags="-d 64"
+        config_flags=""
        ;;
                     15)
-        config_flags="-d 128"
+        config_flags=""
        ;;
                            16)
-        config_flags="-d 16"
+        config_flags=""
        ;;
                            17)
-        config_flags="-d 16"
+        config_flags=""
        ;;
                            18)
-        config_flags="-d 16"
+        config_flags=""
        ;;
                            19)
-        config_flags="-d 16"
+        config_flags=""
        ;;
                            20)
-        config_flags="-d 16"
+        config_flags=""
        ;;
                                   21)
-        config_flags="-d 16"
+        config_flags=""
        ;;                           22)
-        config_flags="-d 16"
+        config_flags=""
        ;;                           23)
-        config_flags="-d 16"
+        config_flags=""
        ;;                           24)
-        config_flags="-d 16"
+        config_flags=""
        ;;                           25)
-        config_flags="-d 16"
+        config_flags=""
        ;;                           26)
-        config_flags="-d 16"
+        config_flags=""
        ;;
 
 
@@ -117,13 +117,13 @@ run_fuzzer()
       config_build
 
     if [ $LOG_OUPTUT = 1 ]; then
-    echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run_$BUILD_CONFIG/sbin/nsd $config_flags   >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &"
+    echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags   >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &"
     ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0  LSAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags  >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &
 
       
     else
-    echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run_$BUILD_CONFIG/sbin/nsd  $config_flags  &"
-    ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0  LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd  $config_flags  &
+    echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd  $config_flags  &"
+    ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0  LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags  &
     fi
     
     fuzzerpids+=($!)

@@ -233,6 +233,8 @@ build_software() {
     sed -i s/3535/$port/g $run_dir/etc/nsd/nsd.conf
     sed -i s/admin/$(whoami)/g $run_dir/etc/nsd/nsd.conf
     $run_dir/sbin/nsd-control-setup
+        cp dict.txt   $run_dir/etc/nsd/
+
     mkdir -p corpus
 
 
