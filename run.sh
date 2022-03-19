@@ -1,5 +1,3 @@
-
-
 FUZZ="--fuzz"
 directory="$(pwd)"
 mkdir -p logs
@@ -9,10 +7,9 @@ PACKET_CAPTURE=0
 
 pkill nsd
 
-
-mkdir logs/old
+mkdir -p logs/old
 cp logrotate.conf logs/logrotate.conf
-sed -i s#tacos#$directory#g logs/logrotate.conf
+sed -i s#tacos#$directory #g logs/logrotate.conf
 
 _term() {
     for fuzzerpid in $puzzerpids; do
@@ -26,143 +23,144 @@ trap _term SIGINT
 
 pids=()
 
-
-config_build()
-{
+config_build() {
     case "${BUILD_CONFIG}" in
 
-      1)
+    1)
         config_flags="-d"
-      ;;
-      2)
+        ;;
+    2)
         config_flags="-d"
-       ;;
-             3)
+        ;;
+    3)
         config_flags="-d"
-       ;;
-             4)
+        ;;
+    4)
         config_flags=""
-       ;;
-             5)
+        ;;
+    5)
         config_flags=""
-       ;;
-             6)
+        ;;
+    6)
         config_flags=""
-       ;;
-             7)
+        ;;
+    7)
         config_flags=""
-       ;;
-             8)
+        ;;
+    8)
         config_flags=""
-       ;;
-             9)
+        ;;
+    9)
         config_flags=""
-       ;;
-             10)
+        ;;
+    10)
         config_flags=""
-       ;;
-                    11)
+        ;;
+    11)
         config_flags=""
-       ;;
-             12)
+        ;;
+    12)
         config_flags=""
-       ;;
-                    13)
+        ;;
+    13)
         config_flags=""
-       ;;
-             14)
+        ;;
+    14)
         config_flags=""
-       ;;
-                    15)
+        ;;
+    15)
         config_flags=""
-       ;;
-                           16)
+        ;;
+    16)
         config_flags=""
-       ;;
-                           17)
+        ;;
+    17)
         config_flags=""
-       ;;
-                           18)
+        ;;
+    18)
         config_flags=""
-       ;;
-                           19)
+        ;;
+    19)
         config_flags=""
-       ;;
-                           20)
+        ;;
+    20)
         config_flags=""
-       ;;
-                                  21)
+        ;;
+    21)
         config_flags=""
-       ;;                           22)
+        ;;
+    22)
         config_flags=""
-       ;;                           23)
+        ;;
+    23)
         config_flags=""
-       ;;                           24)
+        ;;
+    24)
         config_flags=""
-       ;;                           25)
+        ;;
+    25)
         config_flags=""
-       ;;                           26)
+        ;;
+    26)
         config_flags=""
-       ;;
+        ;;
 
-
-      *) echo "Bad case. Try again.";
+    \
+        *)
+        echo "Bad case. Try again."
         echo "Argument should be number 1-10"
-        exit 1;;
+        exit 1
+        ;;
     esac
 }
 
-run_fuzzer()
-{
-      config_build
+run_fuzzer() {
+    config_build
 
     if [ $LOG_OUPTUT = 1 ]; then
-    echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags   >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &"
-    ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0  LSAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags  >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &
+        echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags   >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &"
+        ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags >>$directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &
 
-      
     else
-    echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd  $config_flags  &"
-    ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0  LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags  &
+
+        echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd  $config_flags  &"
+        ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags &
     fi
-    
+
     fuzzerpids+=($!)
 }
 
+for arg in "$@"; do
+    case "$arg" in
+    --fuzz | -f)
+        FUZZ=" "
+        ;;
 
-for arg in "$@"
-do
-  case "$arg" in
-    --fuzz|-f)
-      FUZZ=" "
-      ;;
+    --packet | -p)
+        PACKET_CAPTURE=1
+        ;;
 
-    --packet|-p)
-      PACKET_CAPTURE=1
-      ;;
+    --config=* | -c=*) CONFIG="${arg#*=}" ;;
 
-    --config=*|-c=*) CONFIG="${arg#*=}" ;;
+    --LOG_OUPTUT | -s)
+        LOG_OUPTUT=0
+        ;;
 
-    --LOG_OUPTUT|-s)
-      LOG_OUPTUT=0
-      ;;
-
-  esac
+    esac
 done
 
 if [ ${PACKET_CAPTURE} = 1 ]; then
-  # if [ "$EUID" -ne 0 ]
-  #   then echo "Please run with sudo"
-  #   exit
-  # fi
-  tcpdump -G 43200 -i lo ip6 -w logs/dump$$.pcap -z gzip &
-  fuzzerpids+=($!)
-      sleep 5  
+    # if [ "$EUID" -ne 0 ]
+    #   then echo "Please run with sudo"
+    #   exit
+    # fi
+    tcpdump -G 43200 -i lo ip6 -w logs/dump$$.pcap -z gzip &
+    fuzzerpids+=($!)
+    sleep 5
 fi
 
 if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
-    for BUILD_CONFIG in {1..26}
-    do
+    for BUILD_CONFIG in {1..26}; do
         sleep 0.1
         run_fuzzer
     done
@@ -171,10 +169,7 @@ else
     run_fuzzer
 fi
 
-
-while :
-do
+while :; do
     sleep 5
-    logrotate ./logs/logrotate.conf   -s logs/old/logrotate.status
+    logrotate ./logs/logrotate.conf -s logs/old/logrotate.status
 done
-
