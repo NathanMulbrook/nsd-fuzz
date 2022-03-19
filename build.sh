@@ -229,11 +229,12 @@ build_software() {
     cd $directory
     cp nsd.conf $run_dir/etc/nsd/nsd.conf
     cp *.zone $run_dir/etc/nsd/
-    ./$run_dir/sbin/nsd-control-setup
-    mkdir -p corpus
-
     sed -i s/3535/$port/g $run_dir/etc/nsd/nsd.conf
     sed -i s/admin/$(whoami)/g $run_dir/etc/nsd/nsd.conf
+    $run_dir/sbin/nsd-control-setup
+    mkdir -p corpus
+
+
 
     #sed -i "s#char\spathToTestCaseLog.*#char pathToTestCaseLog[] = \"${directory}/logs/testCases${BUILD_CONFIG}\";#g" \
     # 389-ds-base/ldap/servers/slapd/filter.c 389-ds-base/ldap/servers/slapd/attrsyntax.c 389-ds-base/ldap/servers/slapd/libglobs.c \
@@ -271,9 +272,9 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
         #./build.sh -c=$BUILD_CONFIG $@ &
         #fuzzerpids+=($!)
     done
-    while :; do
-        sleep 5
-    done
+    # while :; do
+    #     sleep 5
+    # done
 
 else
 
