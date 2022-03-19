@@ -16,7 +16,6 @@ export CFLAGS='-g -O2 -fsanitize=fuzzer-no-link,address,undefined,leak -fno-omit
 export CXXFLAGS='-g -O2 -fsanitize=fuzzer-no-link,address,undefined,leak -fno-omit-frame-pointer -fno-optimize-sibling-calls -fprofile-instr-generate -fcoverage-mapping -fsanitize-coverage=trace-cmp -fno-common -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=runtime -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0  -fsanitize-recover=all'
 export config_flags_default="--disable-flto --enable-root-server"
 
-
 # list_descendants ()
 # {
 #   local children=$(ps -o pid= --ppid "$1")
@@ -233,11 +232,9 @@ build_software() {
     sed -i s/3535/$port/g $run_dir/etc/nsd/nsd.conf
     sed -i s/admin/$(whoami)/g $run_dir/etc/nsd/nsd.conf
     $run_dir/sbin/nsd-control-setup
-        cp dict.txt   $run_dir/etc/nsd/
+    cp dict.txt $run_dir/etc/nsd/
 
     mkdir -p corpus
-
-
 
     #sed -i "s#char\spathToTestCaseLog.*#char pathToTestCaseLog[] = \"${directory}/logs/testCases${BUILD_CONFIG}\";#g" \
     # 389-ds-base/ldap/servers/slapd/filter.c 389-ds-base/ldap/servers/slapd/attrsyntax.c 389-ds-base/ldap/servers/slapd/libglobs.c \
