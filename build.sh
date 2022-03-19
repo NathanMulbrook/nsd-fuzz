@@ -189,6 +189,7 @@ build_software() {
     run_dir="$directory/run/run_${BUILD_CONFIG}"
     build_dir="$build_dir_default"
     port=$(($BUILD_CONFIG + 3500))
+    config_port=$(($BUILD_CONFIG + 8950))
     portsec=$(($BUILD_CONFIG + 3550))
     rm -rf $run_dir
     rm $run_dir/sbin/nsd
@@ -230,6 +231,7 @@ build_software() {
     cp nsd.conf $run_dir/etc/nsd/nsd.conf
     cp *.zone $run_dir/etc/nsd/
     sed -i s/3535/$port/g $run_dir/etc/nsd/nsd.conf
+    sed -i s/8952/$config_port/g $run_dir/etc/nsd/nsd.conf
     sed -i s/admin/$(whoami)/g $run_dir/etc/nsd/nsd.conf
     $run_dir/sbin/nsd-control-setup
     cp dict.txt $run_dir/etc/nsd/
