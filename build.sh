@@ -47,13 +47,13 @@ export config_flags_default="--disable-flto --enable-root-server"
 # trap _term INT
 
 cleanup() {
-    cd $source_dir
+    cd $temp_source_dir || exit
     git apply -R ../patches/*.patch
     cd $directory
 }
 
 patch_build() {
-    cd $source_dir
+    cd $temp_source_dir || exit
     git reset --hard
     git apply --reject --ignore-space-change --ignore-whitespace ../patches/*.patch
     cd $directory
@@ -95,8 +95,9 @@ help() {
 # --enable-tcp-fastopen   Enable TCP Fast Open
 
 config_build() {
+    TEMP_CONFIG=($BUILD_CONFIG % 26)
     echo "############# Buiding Config: $BUILD_CONFIG ##################"
-    case "${BUILD_CONFIG}" in
+    case "${TEMP_CONFIG}" in
     1)
         config_flags="${config_flags_default}  --with-ssl=yes --enable-recvmmsg"
         ;;
@@ -186,32 +187,37 @@ config_build() {
 }
 
 build_software() {
+
     run_dir="$directory/run/run_${BUILD_CONFIG}"
-    build_dir="$build_dir_default"
+    build_dir="$build_dir_default/build_${BUILD_CONFIG}"
+    temp_source_dir="$directory/build/src_${BUILD_CONFIG}"
     port=$(($BUILD_CONFIG + 3500))
     portsec=$(($BUILD_CONFIG + 3550))
+
     rm -rf $run_dir
     rm $run_dir/sbin/nsd
     rm -rf $build_dir
+    rm -rf $temp_source_dir
 
+    mkdir -p "$temp_source_dir"
     mkdir -p "$build_dir"
     mkdir -p "$directory/run"
     mkdir -p "$run_dir/sbin"
     mkdir -p "$run_dir/sbin/corpus"
     mkdir -p corpus
-    if [ ${BUILD_INIT} = 1 ]; then
-        git clone git@github.com:NathanMulbrook/nsd.git
-        cd nsd || cleanup
-        git checkout tags/fuzz2
-        aclocal && autoconf && autoheader
-        cd ..
+
+    cp -r "$source_dir" "$temp_source_dir"
+    cd $temp_source_dir
+    if [ $PATCH = 1 ]; then
+        patch_build
     fi
+    aclocal && autoconf && autoheader
     sleep 2
+    config_build
 
-    cd "$build_dir" || cleanup
-
+    cd "$directory/$build_dir" || cleanup
     #../389-ds-base/configure --with-localrundir="$directory/$run_dir/run" --exec-prefix="$directory/$run_dir/" --prefix="$directory/$run_dir/" || exit 5
-    $source_dir/configure --prefix="$run_dir/" --exec-prefix="$run_dir/" $config_flags
+    $temp_source_dir/configure --prefix="$run_dir/" --exec-prefix="$run_dir/" $config_flags
     sleep 2
 
     #Build code
@@ -222,7 +228,16 @@ build_software() {
     rm -p fuzzer.o
     sed -i s/3535/$port/g fuzzer.c
     sed -i "s#FuzzingCorpusDirectory#$directory/corpus#g" fuzzer.c
-    clang -c fuzzer.c -pthread -fsanitize=fuzzer-no-link -Ofast -march=native -o fuzzer.o
+
+    #Use TCP for half of the fuzzers
+    if [ ${BUILD_CONFIG} -gt 26 ]; then
+        fuzzerFlags="-D FUZZTCP"
+        sed -i s/6000/65000/g fuzzer.c
+    else
+        fuzzerFlags=""
+    fi
+
+    clang "$fuzzerFlags" -c fuzzer.c -pthread -fsanitize=fuzzer-no-link -Ofast -march=native -o fuzzer.o
 
     #Build NSD
     make install -j$(($(nproc) + 1))
@@ -261,16 +276,19 @@ for arg in "$@"; do
     esac
 done
 
-if [ $PATCH = 1 ]; then
-    patch_build
+if [ ${BUILD_INIT} = 1 ]; then
+    git clone git@github.com:NathanMulbrook/nsd.git
+    cd nsd || cleanup
+    git checkout tags/fuzz2
+    cd ..
 fi
 
 if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
-    for BUILD_CONFIG in {1..26}; do
-        config_build
-        build_software
-        #./build.sh -c=$BUILD_CONFIG $@ &
-        #fuzzerpids+=($!)
+    for BUILD_CONFIG in {1..52}; do
+        #config_build
+        #build_software
+        ./build.sh -c=$BUILD_CONFIG $@ &
+        fuzzerpids+=($!)
     done
     # while :; do
     #     sleep 5
@@ -279,7 +297,7 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
 else
 
     BUILD_CONFIG="$CONFIG"
-    config_build
+    #config_build
     build_software
 fi
 sleep 2
