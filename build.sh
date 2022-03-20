@@ -88,7 +88,7 @@ help() {
 # --enable-tcp-fastopen   Enable TCP Fast Open
 
 config_build() {
-    TEMP_CONFIG=$(($BUILD_CONFIG % 26))
+    TEMP_CONFIG=$(($BUILD_CONFIG % 26+1))
     echo "############# Buiding Config: $BUILD_CONFIG ##################"
     case "${TEMP_CONFIG}" in
     1)
@@ -282,7 +282,7 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
         #build_software
         ./build.sh -c=$BUILD_CONFIG $@ &
         fuzzerpids+=($!)
-        sleep 10
+        sleep 13
     done
     # while :; do
     #     sleep 5

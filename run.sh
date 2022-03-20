@@ -1,3 +1,4 @@
+#! /usr/bin/env bash
 FUZZ="--fuzz"
 directory="$(pwd)"
 mkdir -p logs
@@ -24,7 +25,8 @@ trap _term SIGINT
 pids=()
 
 config_build() {
-    case "${BUILD_CONFIG}" in
+	TEMP_CONFIG=$((BUILD_CONFIG % 26+1))
+    	case "${TEMP_CONFIG}" in
 
     1)
         config_flags="-d"
@@ -160,7 +162,7 @@ if [ ${PACKET_CAPTURE} = 1 ]; then
 fi
 
 if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
-    for BUILD_CONFIG in {1..26}; do
+    for BUILD_CONFIG in {1..52}; do
         sleep 0.1
         run_fuzzer
     done
