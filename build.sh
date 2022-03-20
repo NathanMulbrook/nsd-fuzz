@@ -16,46 +16,39 @@ export CFLAGS='-g -O2 -fsanitize=fuzzer-no-link,address,undefined,leak -fno-omit
 export CXXFLAGS='-g -O2 -fsanitize=fuzzer-no-link,address,undefined,leak -fno-omit-frame-pointer -fno-optimize-sibling-calls -fprofile-instr-generate -fcoverage-mapping -fsanitize-coverage=trace-cmp -fno-common -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=runtime -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0  -fsanitize-recover=all'
 export config_flags_default="--disable-flto --enable-root-server"
 
-# list_descendants ()
-# {
-#   local children=$(ps -o pid= --ppid "$1")
+list_descendants ()
+{
+  local children=$(ps -o pid= --ppid "$1")
 
-#   for pid in $children
-#   do
-#     list_descendants "$pid"
-#   done
+  for pid in $children
+  do
+    list_descendants "$pid"
+  done
 
-#   echo "$children"
-# }
+  echo "$children"
+}
 
-# kill $(list_descendants $$)
+_term() {
+    echo "Killing Things"
+    # for fuzzerpid in $puzzerpids; do
+    #     kill -TERM "$fuzzerpid"
+    #     kill -9 "$fuzzerpid"
+    # done
+    # kill $(ps -s $$ -o pid=)
 
-# _term() {
-#     echo "Killing Things"
-#     for fuzzerpid in $puzzerpids; do
-#         kill -TERM "$fuzzerpid"
-#         kill -9 "$fuzzerpid"
-#     done
-#     kill $(ps -s $$ -o pid=)
+    kill $(list_descendants $$)
+    kill -9 $(list_descendants $$)
 
-#     kill $(list_descendants $$)
 
-#     exit
-# }
+    exit
+}
 
-# trap _term SIGINT
-# trap _term INT
+trap _term SIGINT
+trap _term INT
 
 cleanup() {
     cd $temp_source_dir || exit
     git apply -R ../patches/*.patch
-    cd $directory
-}
-
-patch_build() {
-    cd $temp_source_dir || exit
-    git reset --hard
-    git apply --reject --ignore-space-change --ignore-whitespace ../patches/*.patch
     cd $directory
 }
 
@@ -95,7 +88,7 @@ help() {
 # --enable-tcp-fastopen   Enable TCP Fast Open
 
 config_build() {
-    TEMP_CONFIG=($BUILD_CONFIG % 26)
+    TEMP_CONFIG=$(($BUILD_CONFIG % 26))
     echo "############# Buiding Config: $BUILD_CONFIG ##################"
     case "${TEMP_CONFIG}" in
     1)
@@ -105,7 +98,7 @@ config_build() {
         config_flags="${config_flags_default}  --with-ssl=yes --enable-bind8-stats"
         ;;
     3)
-        config_flags="${config_flags_default}  --with-ssl=yes --enable-zone-stats"
+        config_flags="${config_flags_default}  --with-ssl=yes "
         ;;
     4)
         config_flags="${config_flags_default}  --with-ssl=yes --enable-ratelimit"
@@ -189,13 +182,12 @@ config_build() {
 build_software() {
 
     run_dir="$directory/run/run_${BUILD_CONFIG}"
-    build_dir="$build_dir_default/build_${BUILD_CONFIG}"
+    build_dir="$directory/$build_dir_default/build_${BUILD_CONFIG}"
     temp_source_dir="$directory/build/src_${BUILD_CONFIG}"
     port=$(($BUILD_CONFIG + 3500))
     portsec=$(($BUILD_CONFIG + 3550))
 
     rm -rf $run_dir
-    rm $run_dir/sbin/nsd
     rm -rf $build_dir
     rm -rf $temp_source_dir
 
@@ -206,16 +198,17 @@ build_software() {
     mkdir -p "$run_dir/sbin/corpus"
     mkdir -p corpus
 
-    cp -r "$source_dir" "$temp_source_dir"
+    cp -r $source_dir/* "$temp_source_dir"
     cd $temp_source_dir
     if [ $PATCH = 1 ]; then
-        patch_build
+        git apply --reject --ignore-space-change --ignore-whitespace ../patches/*.patch
     fi
+    echo "$(pwd)"
     aclocal && autoconf && autoheader
     sleep 2
     config_build
 
-    cd "$directory/$build_dir" || cleanup
+    cd "$build_dir" || cleanup
     #../389-ds-base/configure --with-localrundir="$directory/$run_dir/run" --exec-prefix="$directory/$run_dir/" --prefix="$directory/$run_dir/" || exit 5
     $temp_source_dir/configure --prefix="$run_dir/" --exec-prefix="$run_dir/" $config_flags
     sleep 2
@@ -289,6 +282,7 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
         #build_software
         ./build.sh -c=$BUILD_CONFIG $@ &
         fuzzerpids+=($!)
+        sleep 10
     done
     # while :; do
     #     sleep 5
