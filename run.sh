@@ -9,7 +9,7 @@ pkill nsd
 
 mkdir -p logs/old
 cp logrotate.conf logs/logrotate.conf
-sed -i s#tacos#$directory #g logs/logrotate.conf
+sed -i s#tacos#$directory#g logs/logrotate.conf
 
 _term() {
     for fuzzerpid in $puzzerpids; do
