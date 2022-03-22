@@ -257,8 +257,6 @@ else
     BUILD_CONFIG="$CONFIG"
     build_software
 fi
-sleep 2
-cleanup
 
 # `configure' configures NSD 4.3.10 to adapt to many kinds of systems.
 
