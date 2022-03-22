@@ -146,6 +146,8 @@ build_software() {
     portconf=$(($BUILD_CONFIG + 8900))
 
     #Settup directories
+    pkill -9 -f "run_$BUILD_CONFIG/sbin/nsd"
+    rm "$run_dir/sbin/nsd"
     rm -rf "$run_dir"
     rm -rf "$build_dir"
     rm -rf "$temp_source_dir"
@@ -213,6 +215,7 @@ build_software() {
     mkdir -p corpus
     rm -rf "$build_dir"
     rm -rf "$temp_source_dir"
+    pkill -9 -f "run_$BUILD_CONFIG/sbin/nsd"
 }
 
 for arg in "$@"; do
