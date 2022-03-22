@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-
-export CC=clang
-export CXX=clang++
-export LSAN_OPTIONS=detect_leaks=0
-
 PATCH=1
 CONFIG="a"
 BUILD_INIT=0
@@ -12,19 +7,19 @@ directory="$(pwd)"
 source_dir="$directory/nsd"
 build_dir_default="build"
 
+export CC=clang
+export CXX=clang++
+export LSAN_OPTIONS=detect_leaks=0
 export CFLAGS='-g -O2 -fsanitize=fuzzer-no-link,address,undefined,leak -fno-omit-frame-pointer -fno-optimize-sibling-calls -fprofile-instr-generate -fcoverage-mapping -fsanitize-coverage=trace-cmp -fno-common -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=runtime -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0  -fsanitize-recover=all'
 export CXXFLAGS='-g -O2 -fsanitize=fuzzer-no-link,address,undefined,leak -fno-omit-frame-pointer -fno-optimize-sibling-calls -fprofile-instr-generate -fcoverage-mapping -fsanitize-coverage=trace-cmp -fno-common -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=runtime -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0  -fsanitize-recover=all'
 export config_flags_default="--disable-flto --enable-root-server"
 
-list_descendants ()
-{
+list_descendants () {
   local children=$(ps -o pid= --ppid "$1")
-
   for pid in $children
   do
     list_descendants "$pid"
   done
-
   echo "$children"
 }
 
@@ -46,38 +41,9 @@ cleanup() {
 
 help() {
     echo "Is a useful program"
-    echo "Read the source. kthxbai"
+    echo "Read the source."
+    exit
 }
-
-# --disable-largefile     omit support for large files
-# --enable-recvmmsg       Enable recvmmsg and sendmmsg compilation, faster but
-# some kernel versions may have implementation
-# problems for IPv6
-# --enable-root-server    Configure NSD as a root server
-# --disable-ipv6          Disables IPv6 support
-# --enable-bind8-stats    Enables BIND8 like NSTATS & XSTATS and statistics in
-# nsd-control
-# --enable-zone-stats     Enable per-zone statistics gathering (needs
-# --enable-bind8-stats)
-# --enable-checking       Enable internal runtime checks
-# --enable-memclean       Cleanup memory (at exit) for eg. valgrind, memcheck
-# --enable-ratelimit      Enable rate limiting
-# --enable-ratelimit-default-is-off
-# Enable this to set default of ratelimit to off
-# (enable in nsd.conf), otherwise ratelimit is enabled
-# by default if --enable-ratelimit is enabled
-# --disable-nsec3         Disable NSEC3 support
-# --disable-minimal-responses
-# Disable response minimization. More truncation.
-# --enable-mmap           Use mmap instead of malloc. Experimental.
-# --disable-radix-tree    You can disable the radix tree and use the red-black
-# tree for the main lookups, the red-black tree uses
-# less memory, but uses some more CPU.
-# --enable-packed         Enable packed structure alignment, uses less memory,
-# but unaligned reads.
-# --enable-dnstap         Enable dnstap support (requires fstrm, protobuf-c)
-# --enable-systemd        compile with systemd support
-# --enable-tcp-fastopen   Enable TCP Fast Open
 
 config_build() {
     TEMP_CONFIG=$(($BUILD_CONFIG % 26+1))
@@ -179,6 +145,7 @@ build_software() {
     portsec=$(($BUILD_CONFIG + 3600))
     portconf=$(($BUILD_CONFIG + 8900))
 
+    #Settup directories
     rm -rf "$run_dir"
     rm -rf "$build_dir"
     rm -rf "$temp_source_dir"
@@ -190,6 +157,7 @@ build_software() {
     mkdir -p "$run_dir/sbin/corpus"
     mkdir -p "$directory/corpus"
 
+    #Copy patch and configure source code
     cp -r "$source_dir"/* "$temp_source_dir"
     cd "$temp_source_dir" || cleanup
     if [ $PATCH = 1 ]; then
@@ -202,10 +170,9 @@ build_software() {
     cd "$build_dir" || cleanup
     "$temp_source_dir"/configure --prefix="$run_dir/" --exec-prefix="$run_dir/" $config_flags
     sleep 2
-
-    #Build code
     make clean
-    #Build fuzzer
+
+    #Copy fuzzer code
     cp "$directory"/fuzzer.c ./
     cp "$directory"/fuzzer.h ./
     rm -p fuzzer.o
@@ -220,16 +187,19 @@ build_software() {
         fuzzerFlags=""
     fi
 
+    #Build fuzzer
     clang "$fuzzerFlags" -c fuzzer.c -pthread -fsanitize=fuzzer-no-link -Ofast -march=native -o fuzzer.o
 
     #Build NSD
     make install -j$(($(nproc) + 1))
     if [ $? -ne 0 ]; then
-        echo "########### make failed, retrying ###########"
+        echo "########### Make Failed, Retrying ###########"
         cd "$directory" || cleanup
         ./build.sh $@
         exit
     fi
+
+    #Copy NSD configs and settup NSD
     cd "$directory" || cleanup
     cp nsd.conf "$run_dir"/etc/nsd/nsd.conf
     cp *.zone "$run_dir"/etc/nsd/
@@ -239,35 +209,33 @@ build_software() {
     "$run_dir"/sbin/nsd-control-setup
     cp dict.txt "$run_dir"/etc/nsd/
 
+    #Create corpus dir and cleanup build
     mkdir -p corpus
     rm -rf "$build_dir"
     rm -rf "$temp_source_dir"
-
-    #sed -i "s#char\spathToTestCaseLog.*#char pathToTestCaseLog[] = \"${directory}/logs/testCases${BUILD_CONFIG}\";#g" \
-    # 389-ds-base/ldap/servers/slapd/filter.c 389-ds-base/ldap/servers/slapd/attrsyntax.c 389-ds-base/ldap/servers/slapd/libglobs.c \
-    # 389-ds-base/ldap/servers/slapd/back-ldbm/cache.c 389-ds-base/ldap/servers/slapd/util.c 389-ds-base/ldap/servers/slapd/fuzzer.c \
-    # 389-ds-base/ldap/servers/slapd/valueset.c
-
 }
 
 for arg in "$@"; do
     case "$arg" in
     --help | -h)
         help
-        exit
         ;;
 
     --init | -i)
         BUILD_INIT=1
         ;;
 
-    --no_patch | -p) export PATCH=0 ;;
+    --no_patch | -p)
+        export PATCH=0
+        ;;
 
-    --config=* | -c=*) CONFIG="${arg#*=}" ;;
-
+    --config=* | -c=*)
+        CONFIG="${arg#*=}"
+        ;;
     esac
 done
 
+#Clone repo and checkout fuzz branch
 if [ ${BUILD_INIT} = 1 ]; then
     git clone git@github.com:NathanMulbrook/nsd.git
     cd "$directory/nsd" || cleanup
@@ -275,6 +243,7 @@ if [ ${BUILD_INIT} = 1 ]; then
     cd "$directory" || cleanup
 fi
 
+#Launch the build jobs
 if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
     for BUILD_CONFIG in {1..52}; do
         ./build.sh -c=$BUILD_CONFIG $@ &
@@ -282,7 +251,6 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
         sleep 5
     done
 else
-
     BUILD_CONFIG="$CONFIG"
     build_software
 fi
