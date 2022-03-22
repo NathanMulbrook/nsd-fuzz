@@ -37,7 +37,7 @@ int fuzzServer(const uint8_t *Data, size_t Size) {
   server_addr.sin_addr.s_addr = inet_addr(ip);
   connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
   send(sockfd, Data, Size, 0);
-  usleep(1400);
+  usleep(2200);
   close(sockfd);
   usleep(700);
   return 1;
@@ -56,7 +56,7 @@ char **args_ptr = &arg_array[0];
 int args_size = 6;
 
 void *launchFuzzer2(void *param) {
-    sleep(10);
+    sleep(15);
 
   LLVMFuzzerRunDriver(&args_size, &args_ptr, &fuzzServer);
 }

@@ -29,17 +29,9 @@ list_descendants ()
 }
 
 _term() {
-    echo "Killing Things"
-    # for fuzzerpid in $puzzerpids; do
-    #     kill -TERM "$fuzzerpid"
-    #     kill -9 "$fuzzerpid"
-    # done
-    # kill $(ps -s $$ -o pid=)
-
+    echo "Killing Children"
     kill $(list_descendants $$)
     kill -9 $(list_descendants $$)
-
-
     exit
 }
 
@@ -47,9 +39,9 @@ trap _term SIGINT
 trap _term INT
 
 cleanup() {
-    cd $temp_source_dir || exit
+    cd "$temp_source_dir" || exit
     git apply -R ../patches/*.patch
-    cd $directory
+    cd "$directory" || exit
 }
 
 help() {
@@ -180,7 +172,6 @@ config_build() {
 }
 
 build_software() {
-
     run_dir="$directory/run/run_${BUILD_CONFIG}"
     build_dir="$directory/$build_dir_default/build_${BUILD_CONFIG}"
     temp_source_dir="$directory/build/src_${BUILD_CONFIG}"
@@ -188,40 +179,38 @@ build_software() {
     portsec=$(($BUILD_CONFIG + 3600))
     portconf=$(($BUILD_CONFIG + 8900))
 
-    rm -rf $run_dir
-    rm -rf $build_dir
-    rm -rf $temp_source_dir
+    rm -rf "$run_dir"
+    rm -rf "$build_dir"
+    rm -rf "$temp_source_dir"
 
     mkdir -p "$temp_source_dir"
     mkdir -p "$build_dir"
     mkdir -p "$directory/run"
     mkdir -p "$run_dir/sbin"
     mkdir -p "$run_dir/sbin/corpus"
-    mkdir -p corpus
+    mkdir -p "$directory/corpus"
 
-    cp -r $source_dir/* "$temp_source_dir"
-    cd $temp_source_dir
+    cp -r "$source_dir"/* "$temp_source_dir"
+    cd "$temp_source_dir" || cleanup
     if [ $PATCH = 1 ]; then
         git apply --reject --ignore-space-change --ignore-whitespace ../patches/*.patch
     fi
-    echo "$(pwd)"
     aclocal && autoconf && autoheader
     sleep 2
     config_build
 
     cd "$build_dir" || cleanup
-    #../389-ds-base/configure --with-localrundir="$directory/$run_dir/run" --exec-prefix="$directory/$run_dir/" --prefix="$directory/$run_dir/" || exit 5
-    $temp_source_dir/configure --prefix="$run_dir/" --exec-prefix="$run_dir/" $config_flags
+    "$temp_source_dir"/configure --prefix="$run_dir/" --exec-prefix="$run_dir/" $config_flags
     sleep 2
 
     #Build code
     make clean
     #Build fuzzer
-    cp $directory/fuzzer.c ./
-    cp $directory/fuzzer.h ./
+    cp "$directory"/fuzzer.c ./
+    cp "$directory"/fuzzer.h ./
     rm -p fuzzer.o
     sed -i s/3535/$port/g fuzzer.c
-    sed -i "s#FuzzingCorpusDirectory#$directory/corpus#g" fuzzer.c
+    sed -i "s!FuzzingCorpusDirectory!$directory/corpus!g" fuzzer.c
 
     #Use TCP for half of the fuzzers
     if [ ${BUILD_CONFIG} -gt 26 ]; then
@@ -235,16 +224,24 @@ build_software() {
 
     #Build NSD
     make install -j$(($(nproc) + 1))
-    cd $directory
-    cp nsd.conf $run_dir/etc/nsd/nsd.conf
-    cp *.zone $run_dir/etc/nsd/
-    sed -i s/3535/$port/g $run_dir/etc/nsd/nsd.conf
-    sed -i s/8952/$portconf/g $run_dir/etc/nsd/nsd.conf
-    sed -i s/admin/$(whoami)/g $run_dir/etc/nsd/nsd.conf
-    $run_dir/sbin/nsd-control-setup
-    cp dict.txt $run_dir/etc/nsd/
+    if [ $? -ne 0 ]; then
+        echo "########### make failed, retrying ###########"
+        cd "$directory" || cleanup
+        ./build.sh $@
+        exit
+    fi
+    cd "$directory" || cleanup
+    cp nsd.conf "$run_dir"/etc/nsd/nsd.conf
+    cp *.zone "$run_dir"/etc/nsd/
+    sed -i s/3535/$port/g "$run_dir"/etc/nsd/nsd.conf
+    sed -i s/8952/$portconf/g "$run_dir"/etc/nsd/nsd.conf
+    sed -i s/admin/$(whoami)/g "$run_dir"/etc/nsd/nsd.conf
+    "$run_dir"/sbin/nsd-control-setup
+    cp dict.txt "$run_dir"/etc/nsd/
 
     mkdir -p corpus
+    rm -rf "$build_dir"
+    rm -rf "$temp_source_dir"
 
     #sed -i "s#char\spathToTestCaseLog.*#char pathToTestCaseLog[] = \"${directory}/logs/testCases${BUILD_CONFIG}\";#g" \
     # 389-ds-base/ldap/servers/slapd/filter.c 389-ds-base/ldap/servers/slapd/attrsyntax.c 389-ds-base/ldap/servers/slapd/libglobs.c \
@@ -273,27 +270,20 @@ done
 
 if [ ${BUILD_INIT} = 1 ]; then
     git clone git@github.com:NathanMulbrook/nsd.git
-    cd nsd || cleanup
+    cd "$directory/nsd" || cleanup
     git checkout tags/fuzz2
-    cd ..
+    cd "$directory" || cleanup
 fi
 
 if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
     for BUILD_CONFIG in {1..52}; do
-        #config_build
-        #build_software
         ./build.sh -c=$BUILD_CONFIG $@ &
         fuzzerpids+=($!)
-        sleep 13
+        sleep 5
     done
-    # while :; do
-    #     sleep 5
-    # done
-
 else
 
     BUILD_CONFIG="$CONFIG"
-    #config_build
     build_software
 fi
 sleep 2

@@ -118,6 +118,7 @@ config_build() {
 
 run_fuzzer() {
     config_build
+    mkdir -p $directory/run/run_$BUILD_CONFIG/etc/nsd/logsold
 
     if [ $LOG_OUPTUT = 1 ]; then
         echo "ASAN_OPTIONS=strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$BUILD_CONFIG.log:halt_on_error=0 UBSAN_OPTIONS=halt_on_error=0 LSAN_OPTIONS=detect_leaks=0 $directory/run/run_$BUILD_CONFIG/sbin/nsd $config_flags   >> $directory/logs/error$BUILD_CONFIG 2>>$directory/logs/error$BUILD_CONFIG &"
@@ -172,6 +173,6 @@ else
 fi
 
 while :; do
-    sleep 5
     logrotate ./logs/logrotate.conf -s logs/old/logrotate.status
+    sleep 30
 done
