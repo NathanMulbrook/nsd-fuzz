@@ -13,3 +13,6 @@ build/*
 run/*
 corpus/*
 logs/*
+*.log
+*.pcap
+*.profraw
