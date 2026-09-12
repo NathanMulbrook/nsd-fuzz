@@ -5,7 +5,7 @@ directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$directory/source-version.sh"
 
 CONFIG="all"
-CONFIG_COUNT=30
+CONFIG_COUNT=36
 PATCH=1
 DOWNLOAD_ONLY=0
 BUILD_INIT=0
@@ -15,7 +15,7 @@ PARALLEL_BUILDS="${NSD_FUZZ_PARALLEL_BUILDS:-8}"
 help() {
     echo "Usage: ./build.sh [options]"
     echo "  --config=N, -c=N       Build one configuration"
-    echo "  --all                  Build all 30 configurations (default)"
+    echo "  --all                  Build all 36 configurations (default)"
     echo "  --jobs, -j             Build with four jobs"
     echo "  --jobs=N, -j=N         Parallel make jobs"
     echo "  --parallel-builds=N    Builds to run at the same time (default: 8)"
@@ -249,6 +249,24 @@ config_build() {
     30)
         config_flags=(--enable-checking --enable-memclean --disable-ipv6 --disable-nsec3 --disable-ratelimit --disable-zone-stats --disable-bind8-stats --disable-westmere --disable-haswell)
         ;;
+    31)
+        config_flags=(--enable-packed)
+        ;;
+    32)
+        config_flags=(--enable-packed --disable-radix-tree)
+        ;;
+    33)
+        config_flags=(--enable-packed --enable-mmap)
+        ;;
+    34)
+        config_flags=(--enable-packed --enable-recvmmsg)
+        ;;
+    35)
+        config_flags=(--enable-packed --disable-minimal-responses)
+        ;;
+    36)
+        config_flags=(--enable-packed --disable-westmere --disable-haswell)
+        ;;
     *)
         echo "Build configuration must be between 1 and $CONFIG_COUNT."
         exit 1
@@ -298,6 +316,11 @@ build_software() {
 
     user="$(id -un)"
     config_build
+
+    if [[ " ${config_flags[*]} " == *" --enable-packed "* ]]; then
+        build_cflags="$build_cflags -fno-sanitize=alignment"
+        build_cxxflags="$build_cxxflags -fno-sanitize=alignment"
+    fi
 
     exec {config_lock_fd}>"$lock_dir/config_$BUILD_CONFIG.lock"
     flock "$config_lock_fd"

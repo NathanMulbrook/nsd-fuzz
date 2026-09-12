@@ -41,6 +41,6 @@ process layout.
 Every NSD target object is built with ASan, UBSan, source coverage, and
 `trace-pc-guard`. The fuzzer controller and CoverBridge objects are deliberately
 outside the shared guard map. `checkObjects.sh` verifies that split in all
-object files and all 30 installed NSD binaries. A clean run produces no ASan or
+object files and all 36 installed NSD binaries. A clean run produces no ASan or
 UBSan report. libFuzzer status always goes to `logs/errorN.log` unless
 `--stdout` is used; sanitizer findings go to `logs/asanN.log.PID`.

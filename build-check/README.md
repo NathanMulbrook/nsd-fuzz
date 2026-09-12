@@ -1,6 +1,6 @@
 # Build artifact checker
 
-This checker inspects the 30 NSD build trees and linked `nsd` fuzzing
+This checker inspects the 36 NSD build trees and linked `nsd` fuzzing
 executables with GNU `readelf`; it never executes an artifact. It verifies
 static ELF evidence for ASan, UBSan, shared trace-pc-guard coverage,
 CoverBridge's libFuzzer counters, LLVM profiles, and source coverage.

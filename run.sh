@@ -4,7 +4,7 @@ set -uo pipefail
 directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$directory/toolchain/use-llvm.sh" || exit
 CONFIG="all"
-CONFIG_COUNT=30
+CONFIG_COUNT=36
 SERVER_ONLY=0
 SINGLE_PROCESS=0
 PACKET_CAPTURE=0
@@ -18,7 +18,7 @@ declare -A owned_configs=()
 help() {
     echo "Usage: ./run.sh [options]"
     echo "  --config=N, -c=N  Run one configuration"
-    echo "  --all             Run all 30 configurations (default)"
+    echo "  --all             Run all 36 configurations (default)"
     echo "  --server-only, --fuzz, -f"
     echo "                    Disable the embedded libFuzzer thread"
     echo "  --single-process  Run libFuzzer and the DNS loop in one process"
@@ -65,7 +65,7 @@ done
 
 if [ "$CONFIG" != "a" ] && [ "$CONFIG" != "all" ]; then
     case "$CONFIG" in
-    [1-9] | 1[0-9] | 2[0-9] | 30) ;;
+    [1-9] | 1[0-9] | 2[0-9] | 3[0-6]) ;;
     *)
         echo "Configuration must be between 1 and $CONFIG_COUNT."
         exit 1

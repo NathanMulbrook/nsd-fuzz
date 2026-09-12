@@ -30,8 +30,8 @@ Builds use a repository-local ccache under `toolchain/ccache` when ccache is
 installed. It defaults to 20G. Set `NSD_FUZZ_CCACHE=0` to disable it or
 `NSD_FUZZ_CCACHE_MAXSIZE=SIZE` to change the limit.
 
-Like the 389 fuzzer, no argument means all configurations. This builds all 30
-in batches of eight with one make job per build, then runs all 30 fuzzers:
+Like the 389 fuzzer, no argument means all configurations. This builds all 36
+in batches of eight with one make job per build, then runs all 36 fuzzers:
 
 ```console
 ./build.sh
@@ -57,8 +57,8 @@ Builds, starts and corpus resets coordinate through lock files under
 and refuses to replace a configuration owned by a running campaign. Corpus
 reset refuses to run until every campaign has stopped.
 
-The builds are installed under `run/run_1` through `run/run_30` and listen on
-ports 5301 through 5330. They vary the receive path, allocators, lookup tree,
+The builds are installed under `run/run_1` through `run/run_36` and listen on
+ports 5301 through 5336. They vary the receive path, allocators, lookup tree,
 runtime checks, statistics, DNS features, TCP defaults and SIMD parsers. UDP
 and TCP are selected by the corpus input, so a second set of builds is not
 needed just for TCP.
@@ -66,7 +66,13 @@ Configurations 1, 2, 4, 9, 12 and 30 enable NSD's internal runtime checks so
 failed invariants are reported as fuzzing findings. The other configurations
 use the production-style `NDEBUG` setting so one checked-build assertion does
 not keep most of the fuzzing capacity in a restart loop. Configuration 29 is
-the optimized `-O2` build; the others use `-O1`.
+the optimized `-O2` build; the others use `-O1`. Configurations 31 through 36
+enable NSD's packed structure layout. They cover that layout alone and with
+the red-black lookup tree, mmap allocator, batched receive path, non-minimal
+responses and scalar parser kernels, respectively. The six combinations add
+layout-sensitive query coverage without creating another corpus. Packed mode
+deliberately makes unaligned reads, so those six builds disable only UBSan's
+alignment check; ASan and the remaining UBSan checks stay enabled.
 
 Use `./run.sh --server-only --config=1` to run NSD without starting libFuzzer.
 This is useful for replaying a testcase:
@@ -130,7 +136,7 @@ separately.
 The whole-program number also includes NSD control, reload, transfer-client,
 TLS and zone-maintenance code that network query inputs cannot normally reach.
 
-Check every compiled object and all 30 installed NSD fuzzers for ASan, UBSan,
+Check every compiled object and all 36 installed NSD fuzzers for ASan, UBSan,
 shared guard coverage, CoverBridge/libFuzzer guidance and source coverage with:
 
 ```console
