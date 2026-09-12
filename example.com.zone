@@ -9,6 +9,8 @@ $TTL 86400
 ;
 	NS	dns1.example.com.
 	NS	dns2.example.com.
+	A	192.0.2.10
+	AAAA	2001:db8::10
 dns1	A	192.168.0.1
 	AAAA	aaaa:bbbb::1
 dns2	A	192.168.0.2
@@ -30,3 +32,31 @@ tacos	A	192.168.0.5
 
 dc1	CNAME	services.example.com.
 dc2	CNAME	services.example.com.
+services A	192.168.0.10
+	AAAA	2001:db8::10
+
+@	TXT	"nsd fuzzing zone"
+chain1	CNAME	chain2.example.com.
+chain2	CNAME	services.example.com.
+loop1	CNAME	loop2.example.com.
+loop2	CNAME	loop1.example.com.
+*.wild	A	192.0.2.20
+
+srv	SRV	10 20 443 services.example.com.
+kx	KX	10 mail.example.com.
+rt	RT	10 mail.example.com.
+mb	MB	mail.example.com.
+
+child	NS	ns.child.example.com.
+ns.child A	192.0.2.53
+host.target A	192.0.2.30
+
+minfo	MINFO	mail.example.com.	hostmaster.example.com.
+rp	RP	hostmaster.example.com.	info.example.com.
+info	TXT	"responsible person information"
+afsdb	AFSDB	1 services.example.com.
+px	PX	10 mail.example.com. services.example.com.
+naptr	NAPTR	100 10 "U" "E2U+sip" "!^.*$!sip:info@example.com!" .
+svcb	SVCB	1 services.example.com. alpn="h2,h3" port=443 ipv4hint=192.0.2.10
+https	HTTPS	1 services.example.com. alpn="h2,h3" port=443 ipv6hint=2001:db8::10
+lp	LP	10 services.example.com.
