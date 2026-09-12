@@ -158,6 +158,9 @@ normalized reports are kept under `logs/sanitizer-unique/`, and the original
 reports are compressed under `logs/old/asan/` and `logs/old/ubsan/`. LLVM
 profiles stay under `logs/profiles/`.
 
+Show every configuration's process count, CPU, memory and latest libFuzzer
+progress with `./status.sh`. Use `./status.sh -c=31` to show one configuration.
+
 The build logs are produced by the normal all-configuration build. A single
 `./build.sh -c=N` build writes directly to the terminal, matching the 389
 fuzzer's command behavior. Watch a running libFuzzer with:
