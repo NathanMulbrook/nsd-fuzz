@@ -144,7 +144,7 @@ export CFLAGS="-g \
     -fno-optimize-sibling-calls \
     -fno-common \
     -fsanitize=address,undefined \
-    -fno-sanitize-recover=all \
+    -fsanitize-recover=all \
     -fprofile-instr-generate \
     $profile_continuous_flag \
     -fprofile-update=atomic \

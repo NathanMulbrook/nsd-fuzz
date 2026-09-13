@@ -218,8 +218,8 @@ run_instance() {
     printf '%s\n' "$$" >"$owner_file"
     owned_configs["$build_config"]=1
     sha256sum "$binary" | cut -d ' ' -f 1 >"$instance_profiles/nsd.sha256"
-    asan_options="strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$build_config.log:halt_on_error=1"
-    ubsan_options="halt_on_error=1:print_stacktrace=1"
+    asan_options="strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:log_path=$directory/logs/asan$build_config.log:halt_on_error=0"
+    ubsan_options="halt_on_error=0:print_stacktrace=1"
     env_args=(
         "LLVM_PROFILE_FILE=$profile_file"
         "ASAN_SYMBOLIZER_PATH=$LLVM_ROOT/bin/llvm-symbolizer"

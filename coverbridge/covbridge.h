@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 #ifndef CB_MAX_EDGES
-#define CB_MAX_EDGES 262144u
+#define CB_MAX_EDGES 524288u
 #endif
 #define CB_MAX_INPUT (1024u * 1024u)
 #define CB_COUNTS64 1u

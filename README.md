@@ -148,11 +148,13 @@ runtime logs during a clean fuzzing run; a log appears only when a sanitizer
 finds a problem.
 
 Build output is written to `logs/buildN.log`, server output to `logs/errorN.log`
-and sanitizer output to `logs/asanN.log.PID`. ASan and UBSan use the same Clang
-runtime, so both report types go to that file. Findings write the triggering
-input under `logs/artifacts/`, then `run.sh` restarts the affected configuration
-after two seconds. Use `--no-restart` when a configuration should stay stopped
-for debugging. Leak detection remains disabled.
+and sanitizer output to `logs/asanN.log.PID`. ASan and UBSan use recoverable
+instrumentation with `halt_on_error=0`, matching the 389 fuzzer: recoverable
+diagnostics are logged and fuzzing continues. Assertions and other
+unrecoverable exits still preserve the triggering input under
+`logs/artifacts/`; `run.sh` then restarts the affected configuration after two
+seconds. Use `--no-restart` when a configuration should stay stopped for
+debugging. Leak detection remains disabled.
 `asanProcess.sh` writes normalized unique reports to `asanfiltered.log`. The
 normalized reports are kept under `logs/sanitizer-unique/`, and the original
 reports are compressed under `logs/old/asan/` and `logs/old/ubsan/`. LLVM
