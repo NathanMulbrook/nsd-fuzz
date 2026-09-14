@@ -14,12 +14,23 @@ fi
 exec 6>"$directory/run/locks/corpus.lock"
 flock 6
 
+# The exclusive campaign lock proves no supported run.sh instance is active.
+# Still reject orphaned NSD processes before removing stale ownership records.
+for proc in /proc/[0-9]*/exe; do
+    running_binary="$(readlink "$proc" 2>/dev/null)" || continue
+    running_binary="${running_binary% (deleted)}"
+    case "$running_binary" in
+    "$directory"/run/run_[0-9]*/sbin/nsd)
+        echo "An NSD fuzzing process is still running: $running_binary"
+        echo "Stop it before resetting the corpus."
+        exit 1
+        ;;
+    esac
+done
+
 for owner_file in "$directory"/run/run_*/run/fuzzer.owner; do
-    [ -s "$owner_file" ] || continue
-    owner="$(cat "$owner_file")"
-    echo "A fuzzing campaign owns a configuration under run.sh PID $owner."
-    echo "Stop it before resetting the corpus."
-    exit 1
+    [ -e "$owner_file" ] || continue
+    rm -f -- "$owner_file"
 done
 
 mkdir -p "$directory/logs/old"

@@ -49,7 +49,6 @@ CHECKS = {
                     r"__libfuzzer_extra_counters"),
 }
 MODES = {"present", "absent", "ignore"}
-LEGACY_MODES = {"require": "present", "forbid": "absent", "report": "ignore"}
 STATES = ("FOUND", "SYMBOL-ONLY", "NOT-SEEN", "UNKNOWN")
 
 
@@ -91,7 +90,7 @@ def load_config(path):
             continue
         section_modes = {}
         for check, value in config[section].items():
-            mode = LEGACY_MODES.get(value.strip(), value.strip())
+            mode = value.strip()
             if mode not in MODES:
                 raise ValueError(f"invalid mode for {check}: {mode!r}; use {', '.join(sorted(MODES))}")
             if mode != "ignore" or section != "checks":

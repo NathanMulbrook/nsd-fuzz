@@ -19,7 +19,7 @@ help() {
     echo "Usage: ./run.sh [options]"
     echo "  --config=N, -c=N  Run one configuration"
     echo "  --all             Run all 36 configurations (default)"
-    echo "  --server-only, --fuzz, -f"
+    echo "  --server-only, -f"
     echo "                    Disable the embedded libFuzzer thread"
     echo "  --single-process  Run libFuzzer and the DNS loop in one process"
     echo "  --no-restart      Leave a configuration stopped after it exits"
@@ -37,7 +37,7 @@ for arg in "$@"; do
     --all)
         CONFIG="all"
         ;;
-    --server-only | --fuzz | -f)
+    --server-only | -f)
         SERVER_ONLY=1
         ;;
     --single-process)
@@ -49,7 +49,7 @@ for arg in "$@"; do
     --packet | -p)
         PACKET_CAPTURE=1
         ;;
-    --stdout | -s | --LOG_OUPTUT)
+    --stdout | -s)
         LOG_OUTPUT=0
         ;;
     --config=* | -c=*)
@@ -63,7 +63,7 @@ for arg in "$@"; do
     esac
 done
 
-if [ "$CONFIG" != "a" ] && [ "$CONFIG" != "all" ]; then
+if [ "$CONFIG" != "all" ]; then
     case "$CONFIG" in
     [1-9] | 1[0-9] | 2[0-9] | 3[0-6]) ;;
     *)
@@ -75,7 +75,6 @@ fi
 
 mkdir -p "$directory/logs/old/asan" "$directory/logs/old/ubsan" \
     "$directory/logs/old/error" "$directory/logs/old/build" \
-    "$directory/logs/old/testCases" "$directory/logs/oldasan" \
     "$directory/run/locks"
 
 exec 7>"$directory/run/locks/campaign.lock"
@@ -87,7 +86,7 @@ NSD_FUZZ_CORPUS_LOCKED=1 \
 flock -u 6
 exec 6>&-
 
-sed "s#tacos#$directory#g" "$directory/logrotate.conf" \
+sed "s#@ROOT@#$directory#g" "$directory/logrotate.conf" \
     >"$directory/run/logrotate.conf"
 session="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 profile_dir="$directory/logs/profiles/$session"
@@ -335,7 +334,7 @@ if [ "$PACKET_CAPTURE" -eq 1 ]; then
     pids+=("$!")
 fi
 
-if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
+if [ "$CONFIG" = "all" ]; then
     for ((build_config = 1; build_config <= CONFIG_COUNT; build_config++)); do
         start_instance "$build_config" || exit 1
     done

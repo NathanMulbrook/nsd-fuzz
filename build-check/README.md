@@ -8,7 +8,7 @@ CoverBridge's libFuzzer counters, LLVM profiles, and source coverage.
 Run it from the repository root:
 
 ```sh
-nice -n 19 ionice -c 3 ./checkObjects.sh
+nice -n 19 ionice -c 3 ./check-build.sh
 ```
 
 The checker writes `logs/symbolReport.md`. A zero exit status means every

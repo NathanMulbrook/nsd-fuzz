@@ -42,7 +42,7 @@ Every NSD target object is built with recoverable ASan and UBSan, source
 coverage, and `trace-pc-guard`. Recoverable sanitizer findings are logged and
 the process continues; assertions and other fatal failures use the supervised
 restart path above. The fuzzer controller and CoverBridge objects are
-deliberately outside the shared guard map. `checkObjects.sh` verifies that
+deliberately outside the shared guard map. `check-build.sh` verifies that
 split in all object files and all 36 installed NSD binaries. A clean run
 produces no ASan or UBSan report. libFuzzer status always goes to
 `logs/errorN.log` unless `--stdout` is used; sanitizer findings go to

@@ -17,7 +17,7 @@ help() {
     echo "  --all                  Build all 36 configurations (default)"
     echo "  --jobs, -j             Build with four jobs"
     echo "  --jobs=N, -j=N         Parallel make jobs"
-    echo "  --no-patch, --no_patch, -p"
+    echo "  --no-patch, -p"
     echo "                          Build clean NSD without the fuzzer patches"
     echo "  --init, -i             Clone the patch repositories and download NSD"
     echo "  --download             Download and verify the source, then exit"
@@ -45,7 +45,7 @@ for arg in "$@"; do
     --all)
         CONFIG="all"
         ;;
-    --no-patch | --no_patch | -p)
+    --no-patch | -p)
         PATCH=0
         ;;
     --jobs | -j)
@@ -411,12 +411,11 @@ fi
 flock -u "$corpus_lock_fd"
 exec {corpus_lock_fd}>&-
 
-if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
+if [ "$CONFIG" = "all" ]; then
     mkdir -p "$directory/logs/old/asan" "$directory/logs/old/ubsan" \
         "$directory/logs/old/error" "$directory/logs/old/build" \
-        "$directory/logs/old/testCases" "$directory/logs/oldasan" \
         "$directory/run"
-    sed "s#tacos#$directory#g" "$directory/logrotate.conf" \
+    sed "s#@ROOT@#$directory#g" "$directory/logrotate.conf" \
         >"$directory/run/logrotate.conf"
     if command -v logrotate >/dev/null; then
         logrotate --force "$directory/run/logrotate.conf" \
@@ -425,7 +424,7 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
     build_pids=()
     child_args=()
     if [ "$PATCH" -eq 0 ]; then
-        child_args+=(--no_patch)
+        child_args+=(--no-patch)
     fi
     failed=0
     for ((BUILD_CONFIG = 1; BUILD_CONFIG <= CONFIG_COUNT; BUILD_CONFIG++)); do

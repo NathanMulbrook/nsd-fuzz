@@ -5,8 +5,7 @@ set -euo pipefail
 directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$directory" || exit
 
-mkdir -p logs/old/asan logs/old/ubsan logs/oldasan \
-    logs/sanitizer-unique run
+mkdir -p logs/old/asan logs/old/ubsan logs/sanitizer-unique run
 
 caller_has_lock=0
 if [ -d "/proc/$PPID/fd" ]; then
@@ -41,10 +40,6 @@ done < <(
 if [ "${#sanitizer_logs[@]}" -eq 0 ]; then
     echo "No new sanitizer logs found."
     exit
-fi
-
-if [ -s asanfiltered.log ]; then
-    cp asanfiltered.log logs/oldasan/asanfiltered.log
 fi
 
 tmpdir="$(mktemp -d "$directory/run/asan-process.XXXXXX")"

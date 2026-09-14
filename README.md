@@ -150,7 +150,7 @@ Check every compiled object and all 36 installed NSD fuzzers for ASan, UBSan,
 shared guard coverage, CoverBridge/libFuzzer guidance and source coverage with:
 
 ```console
-nice -n 19 ionice -c 3 ./checkObjects.sh
+nice -n 19 ionice -c 3 ./check-build.sh
 ```
 
 The result is written to `logs/symbolReport.md`. ASan and UBSan do not produce

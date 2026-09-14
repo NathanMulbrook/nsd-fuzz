@@ -39,7 +39,7 @@ case "$CONFIG_COUNT" in
     ;;
 esac
 
-if [ "$CONFIG" != "all" ] && [ "$CONFIG" != "a" ]; then
+if [ "$CONFIG" != "all" ]; then
     case "$CONFIG" in
     '' | *[!0-9]*)
         echo "Configuration must be between 1 and $CONFIG_COUNT." >&2
