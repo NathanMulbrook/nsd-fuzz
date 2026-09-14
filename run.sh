@@ -233,6 +233,9 @@ run_instance() {
     if [ "$SINGLE_PROCESS" -eq 1 ]; then
         env_args+=("NSD_FUZZ_SINGLE_PROCESS=1")
     fi
+    if [ "$build_config" -eq 22 ]; then
+        env_args+=("NSD_FUZZ_IPV6=1")
+    fi
     if [ "$SERVER_ONLY" -eq 1 ]; then
         env_args+=("NSD_FUZZ_DISABLE=1")
     fi

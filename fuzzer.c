@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -24,6 +26,7 @@
 #define MULTIPACKET_FLAG 0x02
 #define WAIT_FOR_RESPONSE_FLAG 0x04
 #define RAW_TCP_FLAG 0x08
+#define TSIG_FLAG 0x10
 #define MAX_PACKET_COUNT 64
 #define MAX_UDP_PACKET_SIZE 65507
 #define RAW_CHUNK_DELAY_US 1000
@@ -34,8 +37,17 @@
 #define STARTUP_RESPONSE_TIMEOUT_MS 500
 #define SOCKET_TIMEOUT_MS 100
 #define COVERBRIDGE_LAYOUT UINT64_C(0x4e534446555a5a01)
+#define TSIG_MAC_SIZE 32
+#define TSIG_FUDGE 300
+
+static const uint8_t tsig_key_name[] = {8, 'f', 'u', 'z', 'z', '-',
+                                        'k', 'e', 'y', 0};
+static const uint8_t tsig_algorithm[] = {11, 'h', 'm', 'a', 'c', '-', 's',
+                                         'h', 'a', '2', '5', '6', 0};
+static const uint8_t tsig_secret[] = "0123456789abcdef0123456789abcdef";
 
 static const char *target_ip = "127.0.0.1";
+static const char *target_ip6 = "::1";
 static int target_port = FUZZ_PORT;
 static int fuzzer_started = 0;
 struct worker_sync {
@@ -198,10 +210,11 @@ static void coverageEnd(void) {
 }
 
 static int connectTarget(int use_tcp) {
-  struct sockaddr_in target;
   struct timeval timeout;
+  int use_ipv6 = getenv("NSD_FUZZ_IPV6") != NULL;
+  int family = use_ipv6 ? AF_INET6 : AF_INET;
   int socket_type = use_tcp ? SOCK_STREAM : SOCK_DGRAM;
-  int sockfd = socket(AF_INET, socket_type, 0);
+  int sockfd = socket(family, socket_type, 0);
   int one = 1;
 
   if (sockfd == -1) {
@@ -216,13 +229,28 @@ static int connectTarget(int use_tcp) {
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   }
 
-  memset(&target, 0, sizeof(target));
-  target.sin_family = AF_INET;
-  target.sin_port = htons(target_port);
-  inet_pton(AF_INET, target_ip, &target.sin_addr);
-  if (connect(sockfd, (struct sockaddr *)&target, sizeof(target)) == -1) {
-    close(sockfd);
-    return -1;
+  if (use_ipv6) {
+    struct sockaddr_in6 target;
+
+    memset(&target, 0, sizeof(target));
+    target.sin6_family = AF_INET6;
+    target.sin6_port = htons(target_port);
+    inet_pton(AF_INET6, target_ip6, &target.sin6_addr);
+    if (connect(sockfd, (struct sockaddr *)&target, sizeof(target)) == -1) {
+      close(sockfd);
+      return -1;
+    }
+  } else {
+    struct sockaddr_in target;
+
+    memset(&target, 0, sizeof(target));
+    target.sin_family = AF_INET;
+    target.sin_port = htons(target_port);
+    inet_pton(AF_INET, target_ip, &target.sin_addr);
+    if (connect(sockfd, (struct sockaddr *)&target, sizeof(target)) == -1) {
+      close(sockfd);
+      return -1;
+    }
   }
   return sockfd;
 }
@@ -243,13 +271,140 @@ static int sendAll(int sockfd, const uint8_t *data, size_t size) {
   return 0;
 }
 
+static void writeU16(uint8_t *data, uint16_t value) {
+  data[0] = (uint8_t)(value >> 8);
+  data[1] = (uint8_t)value;
+}
+
+static void writeU32(uint8_t *data, uint32_t value) {
+  data[0] = (uint8_t)(value >> 24);
+  data[1] = (uint8_t)(value >> 16);
+  data[2] = (uint8_t)(value >> 8);
+  data[3] = (uint8_t)value;
+}
+
+static void writeU48(uint8_t *data, uint64_t value) {
+  data[0] = (uint8_t)(value >> 40);
+  data[1] = (uint8_t)(value >> 32);
+  data[2] = (uint8_t)(value >> 24);
+  data[3] = (uint8_t)(value >> 16);
+  data[4] = (uint8_t)(value >> 8);
+  data[5] = (uint8_t)value;
+}
+
+static int signTsigPacket(const uint8_t *packet, size_t packet_size,
+                          size_t maximum_size, uint8_t **signed_packet,
+                          size_t *signed_size) {
+  const size_t variables_size = sizeof(tsig_key_name) + 2 + 4 +
+                                sizeof(tsig_algorithm) + 6 + 2 + 2 + 2;
+  const size_t rdata_size =
+      sizeof(tsig_algorithm) + 6 + 2 + 2 + TSIG_MAC_SIZE + 2 + 2 + 2;
+  const size_t record_size = sizeof(tsig_key_name) + 2 + 2 + 4 + 2 + rdata_size;
+  uint8_t timestamp[6];
+  uint8_t mac[TSIG_MAC_SIZE];
+  unsigned int mac_size = 0;
+  uint8_t *mac_input;
+  uint8_t *output;
+  uint16_t additional;
+  size_t offset;
+
+  *signed_packet = NULL;
+  *signed_size = packet_size;
+  if (packet_size < 12 || record_size > maximum_size ||
+      packet_size > maximum_size - record_size) {
+    return 0;
+  }
+  additional = ((uint16_t)packet[10] << 8) | packet[11];
+  if (additional == UINT16_MAX) {
+    return 0;
+  }
+
+  mac_input = malloc(packet_size + variables_size);
+  output = malloc(packet_size + record_size);
+  if (!mac_input || !output) {
+    free(mac_input);
+    free(output);
+    return 0;
+  }
+
+  writeU48(timestamp, (uint64_t)time(NULL));
+  memcpy(mac_input, packet, packet_size);
+  offset = packet_size;
+  memcpy(mac_input + offset, tsig_key_name, sizeof(tsig_key_name));
+  offset += sizeof(tsig_key_name);
+  writeU16(mac_input + offset, 255);
+  offset += 2;
+  writeU32(mac_input + offset, 0);
+  offset += 4;
+  memcpy(mac_input + offset, tsig_algorithm, sizeof(tsig_algorithm));
+  offset += sizeof(tsig_algorithm);
+  memcpy(mac_input + offset, timestamp, sizeof(timestamp));
+  offset += sizeof(timestamp);
+  writeU16(mac_input + offset, TSIG_FUDGE);
+  offset += 2;
+  writeU16(mac_input + offset, 0);
+  offset += 2;
+  writeU16(mac_input + offset, 0);
+  offset += 2;
+
+  if (!HMAC(EVP_sha256(), tsig_secret, sizeof(tsig_secret) - 1, mac_input,
+            offset, mac, &mac_size) ||
+      mac_size != TSIG_MAC_SIZE) {
+    free(mac_input);
+    free(output);
+    return 0;
+  }
+  free(mac_input);
+
+  memcpy(output, packet, packet_size);
+  writeU16(output + 10, additional + 1);
+  offset = packet_size;
+  memcpy(output + offset, tsig_key_name, sizeof(tsig_key_name));
+  offset += sizeof(tsig_key_name);
+  writeU16(output + offset, 250);
+  offset += 2;
+  writeU16(output + offset, 255);
+  offset += 2;
+  writeU32(output + offset, 0);
+  offset += 4;
+  writeU16(output + offset, (uint16_t)rdata_size);
+  offset += 2;
+  memcpy(output + offset, tsig_algorithm, sizeof(tsig_algorithm));
+  offset += sizeof(tsig_algorithm);
+  memcpy(output + offset, timestamp, sizeof(timestamp));
+  offset += sizeof(timestamp);
+  writeU16(output + offset, TSIG_FUDGE);
+  offset += 2;
+  writeU16(output + offset, TSIG_MAC_SIZE);
+  offset += 2;
+  memcpy(output + offset, mac, sizeof(mac));
+  offset += sizeof(mac);
+  output[offset++] = packet[0];
+  output[offset++] = packet[1];
+  writeU16(output + offset, 0);
+  offset += 2;
+  writeU16(output + offset, 0);
+  offset += 2;
+
+  *signed_packet = output;
+  *signed_size = offset;
+  return 1;
+}
+
 static int sendPacket(int sockfd, const uint8_t *data, size_t size,
-                      int use_tcp) {
+                      int use_tcp, int use_tsig) {
+  uint8_t *signed_packet = NULL;
+  size_t maximum_size = use_tcp ? 65535 : MAX_UDP_PACKET_SIZE;
   uint8_t length[2];
   uint64_t previous_count;
   int result;
 
+  if (use_tsig && signTsigPacket(data, size, maximum_size, &signed_packet,
+                                 &size)) {
+    data = signed_packet;
+  }
   if (size > 65535) {
+    free(signed_packet);
     return -1;
   }
   if (!use_tcp && size > MAX_UDP_PACKET_SIZE) {
@@ -260,17 +415,21 @@ static int sendPacket(int sockfd, const uint8_t *data, size_t size,
     releaseWorker();
     result = send(sockfd, data, size, MSG_NOSIGNAL) == (ssize_t)size ? 0 : -1;
     if (result == 0 && waitForPacketProcessed(previous_count) == -1) {
-      return -1;
+      result = -1;
     }
+    free(signed_packet);
     return result;
   }
 
   length[0] = (uint8_t)(size >> 8);
   length[1] = (uint8_t)size;
   if (sendAll(sockfd, length, sizeof(length)) == -1) {
+    free(signed_packet);
     return -1;
   }
-  return sendAll(sockfd, data, size);
+  result = sendAll(sockfd, data, size);
+  free(signed_packet);
+  return result;
 }
 
 static int receiveAll(int sockfd, uint8_t *data, size_t size) {
@@ -322,7 +481,8 @@ static int waitForResponse(int sockfd, int timeout_ms, int use_tcp) {
 }
 
 static int sendMultipacketData(int sockfd, const uint8_t *data, size_t size,
-                               int use_tcp, int wait_for_response) {
+                               int use_tcp, int wait_for_response,
+                               int use_tsig) {
   struct timespec started;
   size_t offset = 0;
   size_t packet_count = 0;
@@ -347,7 +507,8 @@ static int sendMultipacketData(int sockfd, const uint8_t *data, size_t size,
     if (packet_size > size - offset) {
       break;
     }
-    if (sendPacket(sockfd, data + offset, packet_size, use_tcp) == -1) {
+    if (sendPacket(sockfd, data + offset, packet_size, use_tcp, use_tsig) ==
+        -1) {
       return -1;
     }
     offset += packet_size;
@@ -434,6 +595,7 @@ int fuzzServer(const uint8_t *data, size_t size) {
   int use_tcp;
   int use_multipacket;
   int raw_tcp;
+  int use_tsig;
   uint64_t previous_count = 0;
 
   coverageBegin();
@@ -447,6 +609,7 @@ int fuzzServer(const uint8_t *data, size_t size) {
   use_tcp = flags & TCP_FLAG;
   use_multipacket = flags & MULTIPACKET_FLAG;
   raw_tcp = use_tcp && (flags & RAW_TCP_FLAG);
+  use_tsig = !raw_tcp && (flags & TSIG_FLAG);
 
   if (!use_multipacket && payload_size > 65535) {
     payload_size = 65535;
@@ -470,15 +633,16 @@ int fuzzServer(const uint8_t *data, size_t size) {
     sendRawTcpData(sockfd, payload, payload_size);
   } else if (use_multipacket) {
     send_result = sendMultipacketData(sockfd, payload, payload_size, use_tcp,
-                                      flags & WAIT_FOR_RESPONSE_FLAG);
+                                      flags & WAIT_FOR_RESPONSE_FLAG,
+                                      use_tsig);
     if (send_result == 1) {
       if (payload_size > 65535) {
         payload_size = 65535;
       }
-      sendPacket(sockfd, payload, payload_size, use_tcp);
+      sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig);
     }
   } else {
-    sendPacket(sockfd, payload, payload_size, use_tcp);
+    sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig);
   }
 
   if (use_tcp) {
@@ -505,7 +669,7 @@ static int targetReady(void) {
   int ready = 0;
 
   if (sockfd != -1) {
-    if (sendPacket(sockfd, query, sizeof(query), 0) == 0 &&
+    if (sendPacket(sockfd, query, sizeof(query), 0, 0) == 0 &&
         waitForResponse(sockfd, STARTUP_RESPONSE_TIMEOUT_MS, 0) == 0) {
       ready = 1;
     }

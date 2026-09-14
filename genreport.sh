@@ -65,7 +65,15 @@ llvm-cov report "$binary" \
     "$source_dir/query.c" \
     "$source_dir/rrl.c" \
     "$source_dir/server.c" \
-    "$source_dir/tsig.c" >"$report_dir/coverage-network.txt"
+    "$source_dir/tsig.c" \
+    "$source_dir/difffile.c" \
+    "$source_dir/ipc.c" \
+    "$source_dir/xfrd.c" \
+    "$source_dir/xfrd-catalog-zones.c" \
+    "$source_dir/xfrd-disk.c" \
+    "$source_dir/xfrd-notify.c" \
+    "$source_dir/xfrd-tcp.c" \
+    "$source_dir/util/proxy_protocol.c" >"$report_dir/coverage-network.txt"
 llvm-cov show "$binary" -format=html \
     -output-dir="$report_dir/html" \
     -instr-profile="$report_dir/coverage.profdata"

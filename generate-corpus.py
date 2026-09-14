@@ -2,6 +2,8 @@
 
 import argparse
 import fcntl
+import hashlib
+import hmac
 import os
 import socket
 import struct
@@ -12,7 +14,13 @@ TCP_FLAG = 0x01
 MULTIPACKET_FLAG = 0x02
 WAIT_FOR_RESPONSE_FLAG = 0x04
 RAW_TCP_FLAG = 0x08
+TSIG_FLAG = 0x10
 COOKIE_SECRET = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+TSIG_KEY_NAME = "fuzz-key."
+TSIG_ALGORITHM = "hmac-sha256."
+TSIG_SECRET = b"0123456789abcdef0123456789abcdef"
+# Keep valid seeds usable throughout the initial large-corpus replay.
+TSIG_FUDGE = 65535
 
 
 def rotate_left(value, bits):
@@ -97,6 +105,34 @@ def query(name, qtype, message_id, flags=0x0100, qclass=1, edns=False,
     return packet
 
 
+def tsig_query(packet, key_name=TSIG_KEY_NAME, signed_time=None,
+               corrupt_mac=False, fudge=TSIG_FUDGE):
+    if len(packet) < 12:
+        raise ValueError("TSIG requires a complete DNS header")
+    if signed_time is None:
+        signed_time = int(time.time())
+
+    key_wire = dns_name(key_name)
+    algorithm_wire = dns_name(TSIG_ALGORITHM)
+    time_wire = signed_time.to_bytes(6, "big")
+    variables = key_wire + struct.pack(">HI", 255, 0)
+    variables += algorithm_wire + time_wire
+    variables += struct.pack(">HHH", fudge, 0, 0)
+    mac = hmac.new(TSIG_SECRET, packet + variables, hashlib.sha256).digest()
+    if corrupt_mac:
+        mac = bytes([mac[0] ^ 0xff]) + mac[1:]
+
+    original_id = struct.unpack_from(">H", packet)[0]
+    rdata = algorithm_wire + time_wire + struct.pack(">HH", fudge, len(mac))
+    rdata += mac + struct.pack(">HHH", original_id, 0, 0)
+    record = key_wire + struct.pack(">HHIH", 250, 255, 0, len(rdata)) + rdata
+
+    additional = struct.unpack_from(">H", packet, 10)[0]
+    if additional == 0xffff:
+        raise ValueError("DNS additional-record count is full")
+    return packet[:10] + struct.pack(">H", additional + 1) + packet[12:] + record
+
+
 def empty_question_edns(message_id):
     packet = struct.pack(">HHHHHH", message_id, 0x0100, 0, 0, 0, 1)
     return packet + edns_record(do=False)
@@ -167,6 +203,10 @@ def main():
     cookie_prefix += struct.pack(">I", int(time.time()))
     cookie_hash_input = cookie_prefix + socket.inet_aton("127.0.0.1")
     cookie_to_verify = cookie_prefix + siphash24(cookie_hash_input, COOKIE_SECRET)
+    cookie_hash_input_ip6 = cookie_prefix + socket.inet_pton(
+        socket.AF_INET6, "::1")
+    cookie_to_verify_ip6 = cookie_prefix + siphash24(
+        cookie_hash_input_ip6, COOKIE_SECRET)
     padding = edns_option(12, b"\x00" * 16)
     zoneversion = edns_option(19)
     combined_options = nsid + cookie + padding + zoneversion
@@ -182,6 +222,14 @@ def main():
     bad_edns_owner = dns_name("bad") + edns_record()[1:]
     option_overrun = struct.pack(">HH", 65002, 8) + b"x"
     framed_a = tcp_frame(a)
+    tsig_a = tsig_query(a)
+    tsig_bad_signature = tsig_query(a, corrupt_mac=True)
+    tsig_bad_key = tsig_query(a, key_name="unknown-fuzz-key.")
+    tsig_bad_time = tsig_query(
+        a, signed_time=int(time.time()) - TSIG_FUDGE - 3600)
+    tsig_edns = tsig_query(query(
+        "example.com", 1, 0x1515, edns=True, options=nsid))
+    tsig_axfr = tsig_query(axfr)
 
     seeds = {
         "udp-a-example": bytes([0]) + a,
@@ -209,6 +257,8 @@ def main():
 
         "udp-cname-example": bytes([0]) + query("dc1.example.com", 1, 0x1201),
         "udp-cname-chain": bytes([0]) + query("chain1.example.com", 1, 0x1202),
+        "tcp-cname-long-chain": bytes([TCP_FLAG]) + query(
+            "longchain01.example.com", 1, 0x120B),
         "udp-cname-loop": bytes([0]) + query("loop1.example.com", 1, 0x1203),
         "udp-wildcard-example": bytes([0]) + query("host.wild.example.com", 1, 0x1204),
         "udp-dname-example": bytes([0]) + query("host.rewrite.example.org", 1, 0x1205),
@@ -242,6 +292,9 @@ def main():
         "udp-edns-cookie-verify": bytes([0]) + query(
             "example.com", 1, 0x1505, edns=True,
             options=edns_option(10, cookie_to_verify)),
+        "udp-edns-cookie-verify-ipv6": bytes([0]) + query(
+            "example.com", 1, 0x1517, edns=True,
+            options=edns_option(10, cookie_to_verify_ip6)),
         "udp-edns-cookie-length-16": bytes([0]) + query(
             "example.com", 1, 0x150D, edns=True,
             options=edns_option(10, client_cookie + b"\x00" * 8)),
@@ -270,6 +323,20 @@ def main():
         "udp-edns-opt-then-address": bytes([0]) + opt_then_address,
         "udp-edns-bad-owner": bytes([0]) + with_additional(
             query("example.com", 1, 0x1514), bad_edns_owner),
+
+        "udp-tsig-valid": bytes([0]) + tsig_a,
+        "udp-tsig-bad-signature": bytes([0]) + tsig_bad_signature,
+        "udp-tsig-bad-key": bytes([0]) + tsig_bad_key,
+        "udp-tsig-bad-time": bytes([0]) + tsig_bad_time,
+        "udp-edns-tsig-valid": bytes([0]) + tsig_edns,
+        "tcp-tsig-axfr": bytes([TCP_FLAG]) + tsig_axfr,
+        "udp-harness-tsig-a": bytes([TSIG_FLAG]) + a,
+        "udp-harness-tsig-edns": bytes([TSIG_FLAG]) + query(
+            "example.com", 1, 0x1516, edns=True, options=nsid),
+        "tcp-harness-tsig-axfr": bytes([TCP_FLAG | TSIG_FLAG]) + axfr,
+        "udp-multi-harness-tsig": bytes([
+            MULTIPACKET_FLAG | WAIT_FOR_RESPONSE_FLAG | TSIG_FLAG
+        ]) + multipacket(a, nxdomain),
 
         "udp-qr-set": bytes([0]) + query("example.com", 1, 0x1701, flags=0x8100),
         "udp-nonzero-rcode": bytes([0]) + query("example.com", 1, 0x1702, flags=0x0103),
@@ -305,6 +372,10 @@ def main():
             query("example.com", 1, 0x1601, edns=True, options=nsid),
             query("example.com", 1, 0x1602, edns=True, options=cookie),
             query("example.com", 1, 0x1603, edns=True, options=zoneversion)),
+        "udp-multi-rrl-positive": bytes([MULTIPACKET_FLAG | WAIT_FOR_RESPONSE_FLAG]) + multipacket(*([a] * 8)),
+        "udp-multi-rrl-nxdomain": bytes([MULTIPACKET_FLAG | WAIT_FOR_RESPONSE_FLAG]) + multipacket(*([nxdomain] * 8)),
+        "udp-multi-rrl-wildcard": bytes([MULTIPACKET_FLAG | WAIT_FOR_RESPONSE_FLAG]) + multipacket(*([
+            query("host.wild.example.com", 1, 0x1604)] * 8)),
         "tcp-multi-delay": bytes([TCP_FLAG | MULTIPACKET_FLAG]) + multipacket(a, nxdomain),
         "tcp-multi-response": bytes([TCP_FLAG | MULTIPACKET_FLAG | WAIT_FOR_RESPONSE_FLAG]) + multipacket(soa, axfr),
         "tcp-multi-edns-state": bytes([TCP_FLAG | MULTIPACKET_FLAG | WAIT_FOR_RESPONSE_FLAG]) + multipacket(

@@ -223,7 +223,7 @@ config_build() {
         config_flags=(--with-tcp-timeout=3600)
         ;;
     22)
-        config_flags=(--enable-recvmmsg --disable-ipv6)
+        config_flags=(--enable-recvmmsg)
         ;;
     23)
         config_flags=(--enable-recvmmsg --disable-minimal-responses)
@@ -384,8 +384,21 @@ build_software() {
         -e "s/RUN_USER/$user/g" \
         -e "s/FUZZ_PORT/$port/g" \
         "$directory/nsd.conf" >"$run_dir/etc/nsd/nsd.conf"
+    if [ "$BUILD_CONFIG" -eq 17 ]; then
+        sed -i '/    verbosity: 2/a\
+    rrl-ratelimit: 1\
+    rrl-whitelist-ratelimit: 1\
+    rrl-slip: 2' "$run_dir/etc/nsd/nsd.conf"
+    fi
+    if [ "$BUILD_CONFIG" -eq 22 ]; then
+        sed -i \
+            -e 's/ip-address: 127.0.0.1/ip-address: ::1/' \
+            -e 's/do-ip4: yes/do-ip4: no/' \
+            -e 's/do-ip6: no/do-ip6: yes/' \
+            "$run_dir/etc/nsd/nsd.conf"
+    fi
     if [[ " ${config_flags[*]} " == *" --disable-ipv6 "* ]]; then
-        sed -i '/::0\/0/d' "$run_dir/etc/nsd/nsd.conf"
+        sed -i '/provide-xfr: ::/d' "$run_dir/etc/nsd/nsd.conf"
     fi
     cp "$directory"/*.zone "$run_dir/etc/nsd/"
     "$run_dir/sbin/nsd-checkconf" "$run_dir/etc/nsd/nsd.conf"

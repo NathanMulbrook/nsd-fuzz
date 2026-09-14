@@ -73,12 +73,18 @@ responses and scalar parser kernels, respectively. The six combinations add
 layout-sensitive query coverage without creating another corpus. Packed mode
 deliberately makes unaligned reads, so those six builds disable only UBSan's
 alignment check; ASan and the remaining UBSan checks stay enabled.
+Configuration 17 uses a low RRL threshold so repeated multipacket seeds cover
+rate-limit slip and drop behavior. The long CNAME-chain seed distinguishes
+the limits in configurations 18 and 19 from the normal build. Configuration
+22 is an IPv6-only batched-receive profile using loopback `::1`; configuration
+5 retains the compile-time no-IPv6 variant.
 
 Use `./run.sh --server-only --config=1` to run NSD without starting libFuzzer.
 This is useful for replaying a testcase:
 
 ```console
 ./send-test-case.py corpus/udp-a-example --port 5301
+./send-test-case.py corpus/udp-a-example --port 5322 --ipv6
 ```
 
 ## Corpus format
@@ -89,16 +95,21 @@ The first byte controls the harness:
 - bit 1: multipacket input
 - bit 2: drain one response between packets
 - bit 3: send TCP bytes without adding a DNS length prefix
+- bit 4: append a fresh valid HMAC-SHA256 TSIG to each DNS packet
 
 A normal input is the control byte followed by one raw DNS packet. A
 multipacket input repeats a two-byte big-endian packet length followed by that
 raw DNS packet. With bits 1 and 3 set, those lengths describe separate TCP
 write chunks, which lets the corpus split the DNS length and body across
 writes. The harness processes at most 64 packets and gives normal multipacket
-inputs three seconds of work before it moves on. `generate-corpus.py` creates
+inputs three seconds of work before it moves on. Bit 4 is ignored for raw TCP
+so the harness does not rewrite deliberately malformed streams. It makes
+authenticated handling reachable while leaving the DNS message itself under
+fuzzer control. `generate-corpus.py` creates
 a small structured corpus with
 ordinary, EDNS, malformed, TCP and multipacket requests. `run.sh` refreshes
-the named seeds so the DNS Cookie verification timestamp is current.
+the named seeds so DNS Cookie and TSIG timestamps are current. A configured
+fuzz-only TSIG key lets the corpus reach authenticated request handling.
 
 The live corpus grows as libFuzzer finds new paths. Stop `run.sh`, then use
 `./reset-corpus.sh` when startup is spending too long reducing old inputs. It

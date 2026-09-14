@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
+import hmac
 import socket
 import struct
 import time
@@ -10,11 +12,50 @@ TCP_FLAG = 0x01
 MULTIPACKET_FLAG = 0x02
 WAIT_FOR_RESPONSE_FLAG = 0x04
 RAW_TCP_FLAG = 0x08
+TSIG_FLAG = 0x10
 MAX_PACKET_COUNT = 64
 MAX_UDP_PACKET_SIZE = 65507
 MAX_PACKET_SIZE = 65535
 MAX_INPUT_SIZE = 131072
 MULTIPACKET_TIMEOUT_SECONDS = 3.0
+TSIG_KEY_NAME = "fuzz-key."
+TSIG_ALGORITHM = "hmac-sha256."
+TSIG_SECRET = b"0123456789abcdef0123456789abcdef"
+TSIG_FUDGE = 300
+
+
+def dns_name(name):
+    if name == ".":
+        return b"\x00"
+    labels = name.rstrip(".").split(".")
+    return b"".join(
+        bytes([len(label)]) + label.encode() for label in labels
+    ) + b"\x00"
+
+
+def sign_tsig(packet, maximum_size):
+    if len(packet) < 12:
+        return packet
+    additional = struct.unpack_from(">H", packet, 10)[0]
+    if additional == 0xffff:
+        return packet
+
+    key_wire = dns_name(TSIG_KEY_NAME)
+    algorithm_wire = dns_name(TSIG_ALGORITHM)
+    time_wire = int(time.time()).to_bytes(6, "big")
+    variables = key_wire + struct.pack(">HI", 255, 0)
+    variables += algorithm_wire + time_wire
+    variables += struct.pack(">HHH", TSIG_FUDGE, 0, 0)
+    mac = hmac.new(TSIG_SECRET, packet + variables, hashlib.sha256).digest()
+    original_id = struct.unpack_from(">H", packet)[0]
+    rdata = algorithm_wire + time_wire
+    rdata += struct.pack(">HH", TSIG_FUDGE, len(mac)) + mac
+    rdata += struct.pack(">HHH", original_id, 0, 0)
+    record = key_wire + struct.pack(">HHIH", 250, 255, 0, len(rdata)) + rdata
+    if len(packet) + len(record) > maximum_size:
+        return packet
+    return (packet[:10] + struct.pack(">H", additional + 1) + packet[12:] +
+            record)
 
 
 def split_packets(data):
@@ -68,6 +109,7 @@ def main():
     parser.add_argument("--port", type=int, default=5301)
     parser.add_argument("--packet", type=int, help="send one 1-based packet from a multipacket input")
     parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument("--ipv6", action="store_true", help="send to loopback ::1")
     args = parser.parse_args()
 
     data = Path(args.testcase).read_bytes()[:MAX_INPUT_SIZE]
@@ -91,9 +133,11 @@ def main():
         packets = [packets[args.packet - 1]]
 
     socket_type = socket.SOCK_STREAM if use_tcp else socket.SOCK_DGRAM
-    with socket.socket(socket.AF_INET, socket_type) as sock:
+    family = socket.AF_INET6 if args.ipv6 else socket.AF_INET
+    address = "::1" if args.ipv6 else "127.0.0.1"
+    with socket.socket(family, socket_type) as sock:
         sock.settimeout(args.timeout)
-        sock.connect(("127.0.0.1", args.port))
+        sock.connect((address, args.port))
         response_count = 0
         started = time.monotonic()
         for index, packet in enumerate(packets, 1):
@@ -101,6 +145,9 @@ def main():
                     time.monotonic() - started >= MULTIPACKET_TIMEOUT_SECONDS):
                 print("multipacket work limit reached")
                 break
+            if flags & TSIG_FLAG and not raw_tcp:
+                maximum_size = MAX_PACKET_SIZE if use_tcp else MAX_UDP_PACKET_SIZE
+                packet = sign_tsig(packet, maximum_size)
             sent_size = send_packet(sock, packet, use_tcp, raw_tcp)
             print(f"sent packet {index}: {sent_size} bytes")
             last_packet = index == len(packets)
