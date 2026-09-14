@@ -10,7 +10,6 @@ PATCH=1
 DOWNLOAD_ONLY=0
 BUILD_INIT=0
 JOBS="${NSD_FUZZ_JOBS:-1}"
-PARALLEL_BUILDS="${NSD_FUZZ_PARALLEL_BUILDS:-8}"
 
 help() {
     echo "Usage: ./build.sh [options]"
@@ -18,7 +17,6 @@ help() {
     echo "  --all                  Build all 36 configurations (default)"
     echo "  --jobs, -j             Build with four jobs"
     echo "  --jobs=N, -j=N         Parallel make jobs"
-    echo "  --parallel-builds=N    Builds to run at the same time (default: 8)"
     echo "  --no-patch, --no_patch, -p"
     echo "                          Build clean NSD without the fuzzer patches"
     echo "  --init, -i             Clone the patch repositories and download NSD"
@@ -59,9 +57,6 @@ for arg in "$@"; do
     --jobs=* | -j=*)
         JOBS="${arg#*=}"
         ;;
-    --parallel-builds=*)
-        PARALLEL_BUILDS="${arg#*=}"
-        ;;
     *)
         echo "Unknown option: $arg"
         help
@@ -83,14 +78,12 @@ if [ "$BUILD_INIT" -eq 1 ]; then
     fi
 fi
 
-for job_count in "$JOBS" "$PARALLEL_BUILDS"; do
-    case "$job_count" in
-        "" | 0 | *[!0-9]*)
-            echo "Job counts must be positive numbers."
-            exit 1
-            ;;
-    esac
-done
+case "$JOBS" in
+    "" | 0 | *[!0-9]*)
+        echo "Job count must be a positive number."
+        exit 1
+        ;;
+esac
 
 lock_dir="$directory/run/locks"
 mkdir -p "$lock_dir"
@@ -435,24 +428,20 @@ if [ "$CONFIG" = "a" ] || [ "$CONFIG" = "all" ]; then
         child_args+=(--no_patch)
     fi
     failed=0
-    for ((batch_start = 1; batch_start <= CONFIG_COUNT; batch_start += PARALLEL_BUILDS)); do
-        batch_end=$((batch_start + PARALLEL_BUILDS - 1))
-        [ "$batch_end" -le "$CONFIG_COUNT" ] || batch_end="$CONFIG_COUNT"
-        for ((BUILD_CONFIG = batch_start; BUILD_CONFIG <= batch_end; BUILD_CONFIG++)); do
-            echo "Starting build $BUILD_CONFIG of $CONFIG_COUNT"
-            "$directory/build.sh" --config="$BUILD_CONFIG" --jobs="$JOBS" \
-                "${child_args[@]}" 2>&1 | \
-                tee "$directory/logs/build$BUILD_CONFIG.log" &
-            build_pids[$BUILD_CONFIG]="$!"
-        done
-        for ((BUILD_CONFIG = batch_start; BUILD_CONFIG <= batch_end; BUILD_CONFIG++)); do
-            if wait "${build_pids[$BUILD_CONFIG]}"; then
-                echo "Finished build $BUILD_CONFIG"
-            else
-                echo "Build $BUILD_CONFIG failed. See logs/build$BUILD_CONFIG.log"
-                failed=1
-            fi
-        done
+    for ((BUILD_CONFIG = 1; BUILD_CONFIG <= CONFIG_COUNT; BUILD_CONFIG++)); do
+        echo "Starting build $BUILD_CONFIG of $CONFIG_COUNT"
+        "$directory/build.sh" --config="$BUILD_CONFIG" --jobs="$JOBS" \
+            "${child_args[@]}" 2>&1 | \
+            tee "$directory/logs/build$BUILD_CONFIG.log" &
+        build_pids[$BUILD_CONFIG]="$!"
+    done
+    for ((BUILD_CONFIG = 1; BUILD_CONFIG <= CONFIG_COUNT; BUILD_CONFIG++)); do
+        if wait "${build_pids[$BUILD_CONFIG]}"; then
+            echo "Finished build $BUILD_CONFIG"
+        else
+            echo "Build $BUILD_CONFIG failed. See logs/build$BUILD_CONFIG.log"
+            failed=1
+        fi
     done
     exit "$failed"
 else

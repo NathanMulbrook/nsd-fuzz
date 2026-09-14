@@ -30,8 +30,8 @@ Builds use a repository-local ccache under `toolchain/ccache` when ccache is
 installed. It defaults to 20G. Set `NSD_FUZZ_CCACHE=0` to disable it or
 `NSD_FUZZ_CCACHE_MAXSIZE=SIZE` to change the limit.
 
-Like the 389 fuzzer, no argument means all configurations. This builds all 36
-in batches of eight with one make job per build, then runs all 36 fuzzers:
+Like the 389 fuzzer, no argument means all configurations. This launches all
+36 builds with one make job each, then runs all 36 fuzzers:
 
 ```console
 ./build.sh
@@ -49,8 +49,7 @@ for four make jobs, and `-f` to run the server without its embedded fuzzer:
 ./run.sh -c=1 --no-restart
 ```
 
-Use `--parallel-builds=N` or `NSD_FUZZ_PARALLEL_BUILDS=N` to change the outer
-build limit. `-j=N` still controls make jobs inside each build.
+Use `-j=N` to control make jobs inside each build.
 
 Builds, starts and corpus resets coordinate through lock files under
 `run/locks`. A build waits for startup of the same configuration to finish,
