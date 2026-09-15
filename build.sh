@@ -390,6 +390,19 @@ build_software() {
             -e 's/do-ip6: no/do-ip6: yes/' \
             "$run_dir/etc/nsd/nsd.conf"
     fi
+    if [ "$BUILD_CONFIG" -eq 28 ]; then
+        sed -i \
+            -e "/    verbosity: 2/a\\
+    proxy-protocol-port: $port\\
+    allow-proxy: 127.0.0.1" \
+            -e '/    name: example.com/a\
+    allow-query: 192.0.2.1 NOKEY\
+    allow-query: 198.51.100.1 BLOCKED' \
+            -e '/    name: example.org/a\
+    allow-query: 0.0.0.0/0 NOKEY\
+    allow-query: 127.0.0.1 BLOCKED' \
+            "$run_dir/etc/nsd/nsd.conf"
+    fi
     if [[ " ${config_flags[*]} " == *" --disable-ipv6 "* ]]; then
         sed -i '/provide-xfr: ::/d' "$run_dir/etc/nsd/nsd.conf"
     fi

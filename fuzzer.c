@@ -27,8 +27,10 @@
 #define WAIT_FOR_RESPONSE_FLAG 0x04
 #define RAW_TCP_FLAG 0x08
 #define TSIG_FLAG 0x10
+#define RAW_PROXY_FLAG 0x20
 #define MAX_PACKET_COUNT 64
 #define MAX_UDP_PACKET_SIZE 65507
+#define PROXY_V2_MAX_HEADER_SIZE 52
 #define RAW_CHUNK_DELAY_US 1000
 #define PROCESS_TIMEOUT_MS 1000
 #define MULTIPACKET_TIMEOUT_MS 3000
@@ -292,6 +294,49 @@ static void writeU48(uint8_t *data, uint64_t value) {
   data[5] = (uint8_t)value;
 }
 
+static int proxyV2Enabled(void) {
+  return getenv("NSD_FUZZ_PROXY_V2") != NULL;
+}
+
+static size_t makeProxyV2Header(uint8_t *header, int use_tcp) {
+  static const uint8_t signature[] = {0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d,
+                                      0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a};
+  int use_ipv6 = getenv("NSD_FUZZ_IPV6") != NULL;
+  size_t address_size = use_ipv6 ? 16 : 4;
+  size_t payload_size = address_size * 2 + 4;
+  size_t offset = 0;
+
+  memcpy(header + offset, signature, sizeof(signature));
+  offset += sizeof(signature);
+  header[offset++] = 0x21; /* Version 2, PROXY command. */
+  header[offset++] = (uint8_t)((use_ipv6 ? 0x20 : 0x10) |
+                               (use_tcp ? 0x01 : 0x02));
+  writeU16(header + offset, (uint16_t)payload_size);
+  offset += 2;
+  if (use_ipv6) {
+    inet_pton(AF_INET6, "2001:db8::1", header + offset);
+    offset += address_size;
+    inet_pton(AF_INET6, target_ip6, header + offset);
+  } else {
+    inet_pton(AF_INET, "192.0.2.1", header + offset);
+    offset += address_size;
+    inet_pton(AF_INET, target_ip, header + offset);
+  }
+  offset += address_size;
+  writeU16(header + offset, 40000);
+  offset += 2;
+  writeU16(header + offset, (uint16_t)target_port);
+  offset += 2;
+  return offset;
+}
+
+static int sendProxyV2Header(int sockfd, int use_tcp) {
+  uint8_t header[PROXY_V2_MAX_HEADER_SIZE];
+  size_t header_size = makeProxyV2Header(header, use_tcp);
+
+  return sendAll(sockfd, header, header_size);
+}
+
 static int signTsigPacket(const uint8_t *packet, size_t packet_size,
                           size_t maximum_size, uint8_t **signed_packet,
                           size_t *signed_size) {
@@ -392,9 +437,12 @@ static int signTsigPacket(const uint8_t *packet, size_t packet_size,
 }
 
 static int sendPacket(int sockfd, const uint8_t *data, size_t size,
-                      int use_tcp, int use_tsig) {
+                      int use_tcp, int use_tsig, int prepend_proxy) {
+  uint8_t proxy_header[PROXY_V2_MAX_HEADER_SIZE];
   uint8_t *signed_packet = NULL;
-  size_t maximum_size = use_tcp ? 65535 : MAX_UDP_PACKET_SIZE;
+  uint8_t *udp_packet = NULL;
+  size_t proxy_size = prepend_proxy ? makeProxyV2Header(proxy_header, 0) : 0;
+  size_t maximum_size = use_tcp ? 65535 : MAX_UDP_PACKET_SIZE - proxy_size;
   uint8_t length[2];
   uint64_t previous_count;
   int result;
@@ -407,16 +455,28 @@ static int sendPacket(int sockfd, const uint8_t *data, size_t size,
     free(signed_packet);
     return -1;
   }
-  if (!use_tcp && size > MAX_UDP_PACKET_SIZE) {
-    size = MAX_UDP_PACKET_SIZE;
+  if (!use_tcp && size > maximum_size) {
+    size = maximum_size;
   }
   previous_count = processedPacketCount();
   if (!use_tcp) {
+    if (prepend_proxy) {
+      udp_packet = malloc(proxy_size + size);
+      if (!udp_packet) {
+        free(signed_packet);
+        return -1;
+      }
+      memcpy(udp_packet, proxy_header, proxy_size);
+      memcpy(udp_packet + proxy_size, data, size);
+      data = udp_packet;
+      size += proxy_size;
+    }
     releaseWorker();
     result = send(sockfd, data, size, MSG_NOSIGNAL) == (ssize_t)size ? 0 : -1;
     if (result == 0 && waitForPacketProcessed(previous_count) == -1) {
       result = -1;
     }
+    free(udp_packet);
     free(signed_packet);
     return result;
   }
@@ -482,7 +542,7 @@ static int waitForResponse(int sockfd, int timeout_ms, int use_tcp) {
 
 static int sendMultipacketData(int sockfd, const uint8_t *data, size_t size,
                                int use_tcp, int wait_for_response,
-                               int use_tsig) {
+                               int use_tsig, int prepend_proxy) {
   struct timespec started;
   size_t offset = 0;
   size_t packet_count = 0;
@@ -507,8 +567,8 @@ static int sendMultipacketData(int sockfd, const uint8_t *data, size_t size,
     if (packet_size > size - offset) {
       break;
     }
-    if (sendPacket(sockfd, data + offset, packet_size, use_tcp, use_tsig) ==
-        -1) {
+    if (sendPacket(sockfd, data + offset, packet_size, use_tcp, use_tsig,
+                   prepend_proxy) == -1) {
       return -1;
     }
     offset += packet_size;
@@ -595,6 +655,8 @@ int fuzzServer(const uint8_t *data, size_t size) {
   int use_tcp;
   int use_multipacket;
   int raw_tcp;
+  int raw_proxy;
+  int prepend_proxy;
   int use_tsig;
   uint64_t previous_count = 0;
 
@@ -608,8 +670,10 @@ int fuzzServer(const uint8_t *data, size_t size) {
   payload_size = size - 1;
   use_tcp = flags & TCP_FLAG;
   use_multipacket = flags & MULTIPACKET_FLAG;
-  raw_tcp = use_tcp && (flags & RAW_TCP_FLAG);
-  use_tsig = !raw_tcp && (flags & TSIG_FLAG);
+  raw_proxy = proxyV2Enabled() && (flags & RAW_PROXY_FLAG);
+  prepend_proxy = proxyV2Enabled() && !raw_proxy;
+  raw_tcp = use_tcp && ((flags & RAW_TCP_FLAG) || raw_proxy);
+  use_tsig = !raw_tcp && !raw_proxy && (flags & TSIG_FLAG);
 
   if (!use_multipacket && payload_size > 65535) {
     payload_size = 65535;
@@ -622,6 +686,14 @@ int fuzzServer(const uint8_t *data, size_t size) {
   if (use_tcp) {
     previous_count = processedPacketCount();
     releaseWorker();
+    if (prepend_proxy && sendProxyV2Header(sockfd, 1) == -1) {
+      close(sockfd);
+      if (waitForPacketProcessed(previous_count) == -1) {
+        fprintf(stderr, "timed out after sending PROXYv2 header\n");
+        abort();
+      }
+      goto done;
+    }
   }
 
   if (raw_tcp && use_multipacket) {
@@ -634,15 +706,17 @@ int fuzzServer(const uint8_t *data, size_t size) {
   } else if (use_multipacket) {
     send_result = sendMultipacketData(sockfd, payload, payload_size, use_tcp,
                                       flags & WAIT_FOR_RESPONSE_FLAG,
-                                      use_tsig);
+                                      use_tsig, prepend_proxy && !use_tcp);
     if (send_result == 1) {
       if (payload_size > 65535) {
         payload_size = 65535;
       }
-      sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig);
+      sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig,
+                 prepend_proxy && !use_tcp);
     }
   } else {
-    sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig);
+    sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig,
+               prepend_proxy && !use_tcp);
   }
 
   if (use_tcp) {
@@ -669,7 +743,7 @@ static int targetReady(void) {
   int ready = 0;
 
   if (sockfd != -1) {
-    if (sendPacket(sockfd, query, sizeof(query), 0, 0) == 0 &&
+    if (sendPacket(sockfd, query, sizeof(query), 0, 0, proxyV2Enabled()) == 0 &&
         waitForResponse(sockfd, STARTUP_RESPONSE_TIMEOUT_MS, 0) == 0) {
       ready = 1;
     }

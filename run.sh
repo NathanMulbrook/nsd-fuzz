@@ -235,6 +235,9 @@ run_instance() {
     if [ "$build_config" -eq 22 ]; then
         env_args+=("NSD_FUZZ_IPV6=1")
     fi
+    if [ "$build_config" -eq 28 ]; then
+        env_args+=("NSD_FUZZ_PROXY_V2=1")
+    fi
     if [ "$SERVER_ONLY" -eq 1 ]; then
         env_args+=("NSD_FUZZ_DISABLE=1")
     fi

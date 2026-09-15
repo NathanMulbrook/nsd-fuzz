@@ -15,6 +15,7 @@ MULTIPACKET_FLAG = 0x02
 WAIT_FOR_RESPONSE_FLAG = 0x04
 RAW_TCP_FLAG = 0x08
 TSIG_FLAG = 0x10
+RAW_PROXY_FLAG = 0x20
 COOKIE_SECRET = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
 TSIG_KEY_NAME = "fuzz-key."
 TSIG_ALGORITHM = "hmac-sha256."
@@ -146,6 +147,14 @@ def tcp_frame(packet):
     return struct.pack(">H", len(packet)) + packet
 
 
+def proxy_v2_header(use_tcp, source="192.0.2.1"):
+    signature = b"\r\n\r\n\x00\r\nQUIT\n"
+    protocol = 0x11 if use_tcp else 0x12
+    addresses = socket.inet_aton(source) + socket.inet_aton("127.0.0.1")
+    addresses += struct.pack(">HH", 40000, 5328)
+    return signature + bytes([0x21, protocol]) + struct.pack(">H", 12) + addresses
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate the initial NSD fuzzing corpus")
     parser.add_argument("directory", nargs="?", default="corpus")
@@ -222,6 +231,9 @@ def main():
     bad_edns_owner = dns_name("bad") + edns_record()[1:]
     option_overrun = struct.pack(">HH", 65002, 8) + b"x"
     framed_a = tcp_frame(a)
+    udp_proxy_a = proxy_v2_header(False) + a
+    udp_proxy_blocked = proxy_v2_header(False, "198.51.100.1") + a
+    tcp_proxy_a = proxy_v2_header(True) + framed_a
     tsig_a = tsig_query(a)
     tsig_bad_signature = tsig_query(a, corrupt_mac=True)
     tsig_bad_key = tsig_query(a, key_name="unknown-fuzz-key.")
@@ -396,6 +408,15 @@ def main():
             framed_a[:1], framed_a[1:8], framed_a[8:]),
         "tcp-raw-chunked-body": bytes([TCP_FLAG | MULTIPACKET_FLAG | RAW_TCP_FLAG]) + multipacket(
             framed_a[:10], framed_a[10:20], framed_a[20:]),
+        "udp-proxy-v2-valid": bytes([RAW_PROXY_FLAG]) + udp_proxy_a,
+        "udp-proxy-v2-blocked-source": bytes([RAW_PROXY_FLAG]) + udp_proxy_blocked,
+        "udp-proxy-v2-short-header": bytes([RAW_PROXY_FLAG]) + udp_proxy_a[:15],
+        "udp-proxy-v2-long-address-length": bytes([RAW_PROXY_FLAG]) +
+            udp_proxy_a[:14] + struct.pack(">H", 36) + udp_proxy_a[16:],
+        "tcp-proxy-v2-valid": bytes([TCP_FLAG | RAW_PROXY_FLAG]) + tcp_proxy_a,
+        "tcp-proxy-v2-chunked": bytes([
+            TCP_FLAG | MULTIPACKET_FLAG | RAW_PROXY_FLAG
+        ]) + multipacket(tcp_proxy_a[:13], tcp_proxy_a[13:28], tcp_proxy_a[28:]),
         "malformed-short-header": b"\x00\x12\x34\x01",
         "malformed-compression-loop": b"\x00\x22\x22\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\xc0\x0c\x00\x01\x00\x01",
         "malformed-large-counts": b"\x00\x33\x33\x01\x00\xff\xff\xff\xff\xff\xff\xff\xff\x00",

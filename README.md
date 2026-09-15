@@ -95,6 +95,7 @@ The first byte controls the harness:
 - bit 2: drain one response between packets
 - bit 3: send TCP bytes without adding a DNS length prefix
 - bit 4: append a fresh valid HMAC-SHA256 TSIG to each DNS packet
+- bit 5: on the PROXYv2 profile, treat the payload as the raw PROXYv2 stream
 
 A normal input is the control byte followed by one raw DNS packet. A
 multipacket input repeats a two-byte big-endian packet length followed by that
@@ -102,9 +103,13 @@ raw DNS packet. With bits 1 and 3 set, those lengths describe separate TCP
 write chunks, which lets the corpus split the DNS length and body across
 writes. The harness processes at most 64 packets and gives normal multipacket
 inputs three seconds of work before it moves on. Bit 4 is ignored for raw TCP
-so the harness does not rewrite deliberately malformed streams. It makes
-authenticated handling reachable while leaving the DNS message itself under
-fuzzer control. `generate-corpus.py` creates
+or raw PROXYv2 inputs so the harness does not rewrite deliberately malformed
+streams. It makes authenticated handling reachable while leaving the DNS
+message itself under fuzzer control. Configuration 28 expects PROXYv2 on its
+listening port. It automatically adds a valid header to ordinary inputs; bit 5
+instead exposes the entire header and DNS payload to mutation. On TCP, bit 5
+also implies raw stream mode. Other configurations ignore bit 5. Replay inputs
+for configuration 28 with `--proxy-v2`. `generate-corpus.py` creates
 a small structured corpus with
 ordinary, EDNS, malformed, TCP and multipacket requests. `run.sh` refreshes
 the named seeds so DNS Cookie and TSIG timestamps are current. A configured
