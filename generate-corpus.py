@@ -147,12 +147,23 @@ def tcp_frame(packet):
     return struct.pack(">H", len(packet)) + packet
 
 
-def proxy_v2_header(use_tcp, source="192.0.2.1"):
+def proxy_v2_raw(ver_cmd, family_protocol, payload=b"", declared_len=None):
     signature = b"\r\n\r\n\x00\r\nQUIT\n"
+    if declared_len is None:
+        declared_len = len(payload)
+    return (
+        signature
+        + bytes([ver_cmd, family_protocol])
+        + struct.pack(">H", declared_len)
+        + payload
+    )
+
+
+def proxy_v2_header(use_tcp, source="192.0.2.1"):
     protocol = 0x11 if use_tcp else 0x12
     addresses = socket.inet_aton(source) + socket.inet_aton("127.0.0.1")
     addresses += struct.pack(">HH", 40000, 5328)
-    return signature + bytes([0x21, protocol]) + struct.pack(">H", 12) + addresses
+    return proxy_v2_raw(0x21, protocol, addresses)
 
 
 def main():
@@ -234,6 +245,9 @@ def main():
     udp_proxy_a = proxy_v2_header(False) + a
     udp_proxy_blocked = proxy_v2_header(False, "198.51.100.1") + a
     tcp_proxy_a = proxy_v2_header(True) + framed_a
+    proxy_ipv6_addresses = socket.inet_pton(socket.AF_INET6, "2001:db8::1")
+    proxy_ipv6_addresses += socket.inet_pton(socket.AF_INET6, "2001:db8::2")
+    proxy_ipv6_addresses += struct.pack(">HH", 40000, 5328)
     tsig_a = tsig_query(a)
     tsig_bad_signature = tsig_query(a, corrupt_mac=True)
     tsig_bad_key = tsig_query(a, key_name="unknown-fuzz-key.")
@@ -413,6 +427,20 @@ def main():
         "udp-proxy-v2-short-header": bytes([RAW_PROXY_FLAG]) + udp_proxy_a[:15],
         "udp-proxy-v2-long-address-length": bytes([RAW_PROXY_FLAG]) +
             udp_proxy_a[:14] + struct.pack(">H", 36) + udp_proxy_a[16:],
+        "udp-proxy-v2-truncated-payload": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x21, 0x12, declared_len=12),
+        "udp-proxy-v2-unknown-command": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x22, 0x12, b"\x00" * 12),
+        "udp-proxy-v2-unspec-local": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x20, 0x00) + a,
+        "udp-proxy-v2-inet-short-address": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x21, 0x12) + a,
+        "udp-proxy-v2-ipv6-valid": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x21, 0x22, proxy_ipv6_addresses) + a,
+        "udp-proxy-v2-ipv6-short-address": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x21, 0x22) + a,
+        "udp-proxy-v2-unknown-family": bytes([RAW_PROXY_FLAG]) +
+            proxy_v2_raw(0x21, 0x32) + a,
         "tcp-proxy-v2-valid": bytes([TCP_FLAG | RAW_PROXY_FLAG]) + tcp_proxy_a,
         "tcp-proxy-v2-chunked": bytes([
             TCP_FLAG | MULTIPACKET_FLAG | RAW_PROXY_FLAG
