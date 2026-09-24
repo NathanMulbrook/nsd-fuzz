@@ -9,6 +9,8 @@ $TTL 86400
 ;
 	NS	dns1.example.com.
 	NS	dns2.example.com.
+	A	192.0.2.10
+	AAAA	2001:db8::10
 dns1	A	192.168.0.1
 	AAAA	aaaa:bbbb::1
 dns2	A	192.168.0.2
@@ -30,3 +32,96 @@ tacos	A	192.168.0.5
 
 dc1	CNAME	services.example.com.
 dc2	CNAME	services.example.com.
+services A	192.168.0.10
+	AAAA	2001:db8::10
+
+@	TXT	"nsd fuzzing zone"
+chain1	CNAME	chain2.example.com.
+chain2	CNAME	services.example.com.
+longchain01	CNAME	longchain02.example.com.
+longchain02	CNAME	longchain03.example.com.
+longchain03	CNAME	longchain04.example.com.
+longchain04	CNAME	longchain05.example.com.
+longchain05	CNAME	longchain06.example.com.
+longchain06	CNAME	longchain07.example.com.
+longchain07	CNAME	longchain08.example.com.
+longchain08	CNAME	longchain09.example.com.
+longchain09	CNAME	longchain10.example.com.
+longchain10	CNAME	longchain11.example.com.
+longchain11	CNAME	longchain12.example.com.
+longchain12	CNAME	longchain13.example.com.
+longchain13	CNAME	longchain14.example.com.
+longchain14	CNAME	longchain15.example.com.
+longchain15	CNAME	longchain16.example.com.
+longchain16	CNAME	longchain17.example.com.
+longchain17	CNAME	longchain18.example.com.
+longchain18	CNAME	longchain19.example.com.
+longchain19	CNAME	longchain20.example.com.
+longchain20	CNAME	longchain21.example.com.
+longchain21	CNAME	longchain22.example.com.
+longchain22	CNAME	longchain23.example.com.
+longchain23	CNAME	longchain24.example.com.
+longchain24	CNAME	longchain25.example.com.
+longchain25	CNAME	longchain26.example.com.
+longchain26	CNAME	longchain27.example.com.
+longchain27	CNAME	longchain28.example.com.
+longchain28	CNAME	longchain29.example.com.
+longchain29	CNAME	longchain30.example.com.
+longchain30	CNAME	longchain31.example.com.
+longchain31	CNAME	longchain32.example.com.
+longchain32	CNAME	longchain33.example.com.
+longchain33	CNAME	longchain34.example.com.
+longchain34	CNAME	longchain35.example.com.
+longchain35	CNAME	longchain36.example.com.
+longchain36	CNAME	longchain37.example.com.
+longchain37	CNAME	longchain38.example.com.
+longchain38	CNAME	longchain39.example.com.
+longchain39	CNAME	longchain40.example.com.
+longchain40	CNAME	longchain41.example.com.
+longchain41	CNAME	longchain42.example.com.
+longchain42	CNAME	longchain43.example.com.
+longchain43	CNAME	longchain44.example.com.
+longchain44	CNAME	longchain45.example.com.
+longchain45	CNAME	longchain46.example.com.
+longchain46	CNAME	longchain47.example.com.
+longchain47	CNAME	longchain48.example.com.
+longchain48	CNAME	longchain49.example.com.
+longchain49	CNAME	longchain50.example.com.
+longchain50	CNAME	longchain51.example.com.
+longchain51	CNAME	longchain52.example.com.
+longchain52	CNAME	longchain53.example.com.
+longchain53	CNAME	longchain54.example.com.
+longchain54	CNAME	longchain55.example.com.
+longchain55	CNAME	longchain56.example.com.
+longchain56	CNAME	longchain57.example.com.
+longchain57	CNAME	longchain58.example.com.
+longchain58	CNAME	longchain59.example.com.
+longchain59	CNAME	longchain60.example.com.
+longchain60	CNAME	longchain61.example.com.
+longchain61	CNAME	longchain62.example.com.
+longchain62	CNAME	longchain63.example.com.
+longchain63	CNAME	longchain64.example.com.
+longchain64	CNAME	longchain65.example.com.
+longchain65	CNAME	services.example.com.
+loop1	CNAME	loop2.example.com.
+loop2	CNAME	loop1.example.com.
+*.wild	A	192.0.2.20
+
+srv	SRV	10 20 443 services.example.com.
+kx	KX	10 mail.example.com.
+rt	RT	10 mail.example.com.
+mb	MB	mail.example.com.
+
+child	NS	ns.child.example.com.
+ns.child A	192.0.2.53
+host.target A	192.0.2.30
+
+minfo	MINFO	mail.example.com.	hostmaster.example.com.
+rp	RP	hostmaster.example.com.	info.example.com.
+info	TXT	"responsible person information"
+afsdb	AFSDB	1 services.example.com.
+px	PX	10 mail.example.com. services.example.com.
+naptr	NAPTR	100 10 "U" "E2U+sip" "!^.*$!sip:info@example.com!" .
+svcb	SVCB	1 services.example.com. alpn="h2,h3" port=443 ipv4hint=192.0.2.10
+https	HTTPS	1 services.example.com. alpn="h2,h3" port=443 ipv6hint=2001:db8::10
+lp	LP	10 services.example.com.

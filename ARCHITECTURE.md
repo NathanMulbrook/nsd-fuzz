@@ -1,0 +1,52 @@
+# Fuzzer architecture
+
+NSD normally forks its network workers. libFuzzer and SanitizerCoverage keep
+their live guidance in process memory, so a libFuzzer loop in the NSD parent
+cannot see coverage written only by a query worker. LLVM source profiles are
+file-backed and are useful for reports, but they do not guide the current
+libFuzzer input.
+
+The fuzzer therefore keeps libFuzzer in NSD's server-main parent and runs
+exactly one normal query worker. CoverBridge allocates a shared
+`trace-pc-guard` counter map before the fork. Only the query worker records into
+that map. After each input, the parent snapshots the map into libFuzzer's extra
+counters. This gives stock libFuzzer worker edge-site and hit-count feedback
+while preserving NSD's normal query process boundary. Comparison operands and
+value profiles remain process-local and are not imported.
+
+`server-count: 1` is required and enforced because one input must have one
+worker and one coverage snapshot. xfrd forks before the bridge producer is
+enabled and remains outside input coverage. Reload is ignored during a fuzzing
+campaign because replacing the worker would invalidate the shared state and
+the input boundary.
+
+The worker parks before every input. The parent clears the shared counters,
+releases the worker, and sends the input. The handler records completion and
+returns; the worker then parks at the event-loop boundary. The parent waits for
+both events before it imports coverage or returns the libFuzzer callback. This
+two-phase handshake does not rely on a timing delay, and prevents handler-tail
+coverage or a fatal worker exit from being attributed to the next input. A UDP
+packet covers one receive-handler batch; a multipacket iteration aggregates
+the batches for all of its packets. A TCP iteration covers one connection,
+including every packet or write chunk in a multipacket input.
+
+If the query worker exits, the parent exits too. `run.sh` retains libFuzzer's
+artifact and restarts the complete NSD tree after two seconds. Forking a new
+worker from a running multithreaded libFuzzer parent would be unsafe and would
+also make the coverage boundary ambiguous. `--no-restart` leaves the instance
+stopped for debugging.
+
+`--single-process` keeps the same park/release boundary while running the DNS
+handler in the libFuzzer process. It is useful as a coverage comparison and
+diagnostic mode; the default parent/worker mode exercises the production
+process layout.
+
+Every NSD target object is built with recoverable ASan and UBSan, source
+coverage, and `trace-pc-guard`. Recoverable sanitizer findings are logged and
+the process continues; assertions and other fatal failures use the supervised
+restart path above. The fuzzer controller and CoverBridge objects are
+deliberately outside the shared guard map. `check-build.sh` verifies that
+split in all object files and all 36 installed NSD binaries. A clean run
+produces no ASan or UBSan report. libFuzzer status always goes to
+`logs/errorN.log` unless `--stdout` is used; sanitizer findings go to
+`logs/asanN.log.PID`.
