@@ -134,10 +134,12 @@ build.
 By default, libFuzzer runs in NSD's parent process and the normal NSD query
 worker runs in a child process. CoverBridge uses a shared `trace-pc-guard` map
 to bring the worker's site coverage and hit counts back to stock libFuzzer
-before each input returns. The bridge source used by the build is under
-`coverbridge/`. Its comparison operands and value profiles do not cross the
-process boundary, so this build uses worker site and hit-count guidance. Use
-`--single-process` when comparing against the older harness layout.
+before each input returns. An explicit completion-and-park handshake keeps each
+snapshot associated with the input that produced it; it does not depend on a
+fixed delay. The bridge source used by the build is under `coverbridge/`. Its
+comparison operands and value profiles do not cross the process boundary, so
+this build uses worker site and hit-count guidance. Use `--single-process` when
+comparing against the older harness layout.
 
 The parent starts libFuzzer only after the query worker has been forked. If a
 query worker dies, the parent also stops so `run.sh` can preserve libFuzzer's
@@ -161,6 +163,57 @@ nice -n 19 ionice -c 3 ./check-build.sh
 The result is written to `logs/symbolReport.md`. ASan and UBSan do not produce
 runtime logs during a clean fuzzing run; a log appears only when a sanitizer
 finds a problem.
+
+## Static analysis
+
+Run one GCC analyzer build of the unmodified target release with:
+
+```console
+./static-analysis.sh
+```
+
+This is a separate review pass, not another fuzzer configuration. It extracts a
+clean source archive into a temporary directory and writes the warning list to
+`logs/static-analysis.log`; complete compiler output goes to
+`logs/static-analysis-full.log`. Analyzer warnings are leads, not findings, and
+must be reproduced through the real server path before they are reported.
+
+The machine-local 2026-09-23 baseline used Fedora 42, GCC 15.2.1, and the
+script's release profile (`--with-libevent=no --disable-dnstap`, with other
+optional features auto-detected). It produced 15 diagnostics; none was a
+confirmed bug:
+
+| Diagnostics | Triage |
+| --- | --- |
+| 6 simdzone loop reports | Repeated for three parser kernels; scanner progress is outside GCC's model. |
+| 3 generated lexer/parser reports | Generated-code lifetime and initialization false positives. |
+| 4 possible null dereferences | Excluded by the caller, list, name-length, or verifier-slot invariant. |
+| 2 descriptor leaks | Intentional `dup2` inheritance of child stdout/stderr. |
+
+Counts can change with the GCC version and available dependencies. The dated
+summary log, rather than this baseline table, is authoritative for a new run.
+
+Manual follow-up of adjacent code did identify two low-impact protocol/ACL
+issues, recorded in the private findings inventory. They were not GCC analyzer
+diagnostics and were not directly found by a fuzz input.
+
+Two local reliability observations remain triage notes rather than findings:
+an external-verifier setup failure can enter cleanup before its verifier slot
+has a zone assigned, and the xfrd signal-event capacity assertion uses `<=`
+where `<` would be correct. The first requires a configured verifier plus a
+local `fcntl`/`fdopen` failure; the second has eight fixed callers for ten
+slots. Neither is controlled by a DNS request in the reviewed code.
+
+Fuzz Introspector is not part of the routine workflow. The libFuzzer entry
+point sends requests over a socket to a separately forked NSD process, then
+CoverBridge imports the server's dynamic coverage. A static call tree rooted at
+`LLVMFuzzerTestOneInput` cannot cross that process/socket boundary and would
+misclassify most server code as unreachable. Its custom compiler/LTO and report
+stack therefore add little useful information here. Reconsider it after adding
+a direct in-process target. The main structural gap is inbound
+AXFR/IXFR/NOTIFY and xfrd; that would benefit more from a focused
+malicious-primary harness than another reporting layer on the existing
+client-query harness.
 
 Build output is written to `logs/buildN.log`, server output to `logs/errorN.log`
 and sanitizer output to `logs/asanN.log.PID`. ASan and UBSan use recoverable

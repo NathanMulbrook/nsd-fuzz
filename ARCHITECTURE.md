@@ -21,11 +21,14 @@ campaign because replacing the worker would invalidate the shared state and
 the input boundary.
 
 The worker parks before every input. The parent clears the shared counters,
-releases the worker, sends the input, waits for the worker to finish, and then
-imports the snapshot. A UDP iteration covers one receive-handler batch. A TCP
-iteration covers one connection, including every packet or write chunk in a
-multipacket input. These boundaries keep coverage from adjacent inputs out of
-the snapshot.
+releases the worker, and sends the input. The handler records completion and
+returns; the worker then parks at the event-loop boundary. The parent waits for
+both events before it imports coverage or returns the libFuzzer callback. This
+two-phase handshake does not rely on a timing delay, and prevents handler-tail
+coverage or a fatal worker exit from being attributed to the next input. A UDP
+packet covers one receive-handler batch; a multipacket iteration aggregates
+the batches for all of its packets. A TCP iteration covers one connection,
+including every packet or write chunk in a multipacket input.
 
 If the query worker exits, the parent exits too. `run.sh` retains libFuzzer's
 artifact and restarts the complete NSD tree after two seconds. Forking a new

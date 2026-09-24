@@ -4,6 +4,7 @@
 void launchFuzzer(void);
 void fuzzerShutdown(void);
 void fuzzerPacketProcessed(void);
+void fuzzerWorkerCheckpoint(void);
 void fuzzerWorkerWait(void);
 int fuzzerInitialize(void);
 

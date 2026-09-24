@@ -54,6 +54,7 @@ static int target_port = FUZZ_PORT;
 static int fuzzer_started = 0;
 struct worker_sync {
   _Atomic uint64_t packets_processed;
+  _Atomic int completion_pending;
   _Atomic int parked;
   sem_t release;
 };
@@ -71,12 +72,10 @@ static int waitForResponse(int sockfd, int timeout_ms, int use_tcp);
 
 void fuzzerPacketProcessed(void) {
   if (worker_sync) {
-    if (worker_barrier_mode) {
-      atomic_store_explicit(&worker_sync->parked, 1, memory_order_release);
-    }
+    atomic_store_explicit(&worker_sync->completion_pending, 1,
+                          memory_order_release);
     atomic_fetch_add_explicit(&worker_sync->packets_processed, 1,
                               memory_order_release);
-    fuzzerWorkerWait();
   }
 }
 
@@ -105,6 +104,16 @@ void fuzzerWorkerWait(void) {
   atomic_store_explicit(&worker_sync->parked, 0, memory_order_release);
 }
 
+void fuzzerWorkerCheckpoint(void) {
+  if (!worker_barrier_mode || !worker_sync) {
+    return;
+  }
+  if (atomic_exchange_explicit(&worker_sync->completion_pending, 0,
+                               memory_order_acq_rel)) {
+    fuzzerWorkerWait();
+  }
+}
+
 static void releaseWorker(void) {
   struct timespec pause = {0, 1000000L};
   int attempt;
@@ -131,7 +140,8 @@ static int waitForPacketProcessed(uint64_t previous_count) {
   struct timespec pause = {0, 1000000L};
 
   clock_gettime(CLOCK_MONOTONIC, &started);
-  while (processedPacketCount() == previous_count) {
+  while (processedPacketCount() == previous_count ||
+         !atomic_load_explicit(&worker_sync->parked, memory_order_acquire)) {
     struct timespec now;
     int64_t elapsed;
 
@@ -162,7 +172,14 @@ int fuzzerInitialize(void) {
   worker_is_child_process = getenv("NSD_FUZZ_COVERBRIDGE") &&
                             !getenv("NSD_FUZZ_SINGLE_PROCESS");
   atomic_init(&worker_sync->packets_processed, 0);
+  atomic_init(&worker_sync->completion_pending, 0);
   atomic_init(&worker_sync->parked, 0);
+  if (!atomic_is_lock_free(&worker_sync->packets_processed) ||
+      !atomic_is_lock_free(&worker_sync->completion_pending) ||
+      !atomic_is_lock_free(&worker_sync->parked)) {
+    errno = ENOTSUP;
+    return -1;
+  }
   if (sem_init(&worker_sync->release, worker_is_child_process, 0) == -1) {
     return -1;
   }
@@ -471,10 +488,12 @@ static int sendPacket(int sockfd, const uint8_t *data, size_t size,
       data = udp_packet;
       size += proxy_size;
     }
-    releaseWorker();
     result = send(sockfd, data, size, MSG_NOSIGNAL) == (ssize_t)size ? 0 : -1;
-    if (result == 0 && waitForPacketProcessed(previous_count) == -1) {
-      result = -1;
+    if (result == 0) {
+      releaseWorker();
+      if (waitForPacketProcessed(previous_count) == -1) {
+        result = -1;
+      }
     }
     free(udp_packet);
     free(signed_packet);
