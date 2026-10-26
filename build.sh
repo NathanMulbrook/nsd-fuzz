@@ -5,7 +5,7 @@ directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$directory/source-version.sh"
 
 CONFIG="all"
-CONFIG_COUNT=36
+CONFIG_COUNT=38
 PATCH=1
 DOWNLOAD_ONLY=0
 BUILD_INIT=0
@@ -14,7 +14,7 @@ JOBS="${NSD_FUZZ_JOBS:-1}"
 help() {
     echo "Usage: ./build.sh [options]"
     echo "  --config=N, -c=N       Build one configuration"
-    echo "  --all                  Build all 36 configurations (default)"
+    echo "  --all                  Build all 38 configurations (default)"
     echo "  --jobs, -j             Build with four jobs"
     echo "  --jobs=N, -j=N         Parallel make jobs"
     echo "  --no-patch, -p"
@@ -260,6 +260,12 @@ config_build() {
     36)
         config_flags=(--enable-packed --disable-westmere --disable-haswell)
         ;;
+    37)
+        config_flags=(--enable-checking)
+        ;;
+    38)
+        config_flags=(--enable-checking)
+        ;;
     *)
         echo "Build configuration must be between 1 and $CONFIG_COUNT."
         exit 1
@@ -385,9 +391,8 @@ build_software() {
     fi
     if [ "$BUILD_CONFIG" -eq 22 ]; then
         sed -i \
-            -e 's/ip-address: 127.0.0.1/ip-address: ::1/' \
+            -e '/ip-address: 127.0.0.1/d' \
             -e 's/do-ip4: yes/do-ip4: no/' \
-            -e 's/do-ip6: no/do-ip6: yes/' \
             "$run_dir/etc/nsd/nsd.conf"
     fi
     if [ "$BUILD_CONFIG" -eq 28 ]; then
@@ -403,8 +408,24 @@ build_software() {
     allow-query: 127.0.0.1 BLOCKED' \
             "$run_dir/etc/nsd/nsd.conf"
     fi
+    if [ "$BUILD_CONFIG" -eq 37 ]; then
+        cat >>"$run_dir/etc/nsd/nsd.conf" <<EOF
+
+zone:
+    name: secondary.example
+    request-xfr: 127.0.0.1@$((port + 1000)) NOKEY
+    allow-notify: 127.0.0.1 NOKEY
+
+zone:
+    name: secondary-ixfr.example
+    request-xfr: 127.0.0.1@$((port + 1000)) NOKEY
+    allow-notify: 127.0.0.1 NOKEY
+EOF
+    fi
     if [[ " ${config_flags[*]} " == *" --disable-ipv6 "* ]]; then
-        sed -i '/provide-xfr: ::/d' "$run_dir/etc/nsd/nsd.conf"
+        sed -i -e '/provide-xfr: ::/d' -e '/allow-notify: ::/d' \
+            -e '/ip-address: ::1/d' -e 's/do-ip6: yes/do-ip6: no/' \
+            "$run_dir/etc/nsd/nsd.conf"
     fi
     cp "$directory"/*.zone "$run_dir/etc/nsd/"
     "$run_dir/sbin/nsd-checkconf" "$run_dir/etc/nsd/nsd.conf"

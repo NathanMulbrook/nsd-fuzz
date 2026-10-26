@@ -281,6 +281,20 @@ def main():
         "tcp-ixfr-current": bytes([TCP_FLAG]) + ixfr_current,
         "tcp-ixfr-old": bytes([TCP_FLAG]) + ixfr_old,
 
+        "secondary-axfr": bytes([0x40, 0])
+            + soa_record("secondary.example", 42)
+            + dns_name("secondary.example")
+            + struct.pack(">HHIH", 1, 1, 0, 4)
+            + socket.inet_aton("192.0.2.10")
+            + soa_record("secondary.example", 42),
+        "secondary-axfr-empty": bytes([0x40, 0]),
+        "secondary-ixfr-bootstrap": bytes([0x40, 1])
+            + soa_record("secondary-ixfr.example", 42)
+            + soa_record("secondary-ixfr.example", 42),
+        "secondary-ixfr-delta": bytes([0x40, 1])
+            + soa_record("secondary-ixfr.example", 42)
+            + soa_record("secondary-ixfr.example", 43),
+
         "udp-cname-example": bytes([0]) + query("dc1.example.com", 1, 0x1201),
         "udp-cname-chain": bytes([0]) + query("chain1.example.com", 1, 0x1202),
         "tcp-cname-long-chain": bytes([TCP_FLAG]) + query(

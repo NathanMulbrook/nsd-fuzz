@@ -28,6 +28,9 @@
 #define RAW_TCP_FLAG 0x08
 #define TSIG_FLAG 0x10
 #define RAW_PROXY_FLAG 0x20
+#define SECONDARY_FLAG 0x40
+#define QHEADERSZ_LOCAL 12
+#define XFER_TRANSFER_TIMEOUT_MS 2000
 #define MAX_PACKET_COUNT 64
 #define MAX_UDP_PACKET_SIZE 65507
 #define PROXY_V2_MAX_HEADER_SIZE 52
@@ -51,7 +54,20 @@ static const uint8_t tsig_secret[] = "0123456789abcdef0123456789abcdef";
 static const char *target_ip = "127.0.0.1";
 static const char *target_ip6 = "::1";
 static int target_port = FUZZ_PORT;
+static int secondary_port = FUZZ_PORT + 1000;
 static int fuzzer_started = 0;
+#define XFER_MAX_PAYLOAD 65535
+static uint8_t xfer_payload[XFER_MAX_PAYLOAD + 1];
+static _Atomic size_t xfer_payload_size;
+static _Atomic uint64_t xfer_transfers_done;
+static _Atomic uint32_t xfer_last_serial;
+static const uint8_t xfer_zone_axfr[] = {9, 's', 'e', 'c', 'o', 'n', 'd', 'a',
+                                         'r', 'y', 7, 'e', 'x', 'a', 'm',
+                                         'p', 'l', 'e', 0};
+static const uint8_t xfer_zone_ixfr[] = {14, 's', 'e', 'c', 'o', 'n', 'd',
+                                         'a', 'r', 'y', '-', 'i', 'x', 'f',
+                                         'r', 7, 'e', 'x', 'a', 'm', 'p',
+                                         'l', 'e', 0};
 struct worker_sync {
   _Atomic uint64_t packets_processed;
   _Atomic int completion_pending;
@@ -665,6 +681,294 @@ static void drainTcpConnection(int sockfd) {
   }
 }
 
+static int secondaryEnabled(void) {
+  return getenv("NSD_FUZZ_SECONDARY") != NULL;
+}
+
+static size_t xferSkipName(const uint8_t *data, size_t size, size_t offset) {
+  while (offset < size) {
+    uint8_t length = data[offset];
+    if ((length & 0xC0) == 0xC0) {
+      return offset + 2 <= size ? offset + 2 : size + 1;
+    }
+    if (length == 0) {
+      return offset + 1;
+    }
+    offset += 1 + length;
+  }
+  return size + 1;
+}
+
+static size_t xferCountRrs(const uint8_t *data, size_t size,
+                           uint32_t *last_serial, int *have_serial) {
+  size_t offset = 0;
+  size_t count = 0;
+  *have_serial = 0;
+  *last_serial = 0;
+  while (offset < size) {
+    size_t rr_start;
+    uint16_t type;
+    uint16_t rdlen;
+    offset = xferSkipName(data, size, offset);
+    if (offset + 10 > size) {
+      break;
+    }
+    rr_start = offset;
+    type = ((uint16_t)data[offset] << 8) | data[offset + 1];
+    rdlen = ((uint16_t)data[offset + 8] << 8) | data[offset + 9];
+    if (offset + 10 + rdlen > size) {
+      break;
+    }
+    if (type == 6 && rdlen >= 10) {
+      size_t rpos = rr_start + 10;
+      size_t rend = rr_start + 10 + rdlen;
+      rpos = xferSkipName(data, rend, rpos);
+      rpos = xferSkipName(data, rend, rpos);
+      if (rpos + 4 <= rend) {
+        *last_serial = ((uint32_t)data[rpos] << 24) |
+                       ((uint32_t)data[rpos + 1] << 16) |
+                       ((uint32_t)data[rpos + 2] << 8) | data[rpos + 3];
+        *have_serial = 1;
+      }
+    }
+    offset = rr_start + 10 + rdlen;
+    count++;
+  }
+  return count;
+}
+
+static size_t xferQuestionEnd(const uint8_t *data, size_t size) {
+  size_t offset = xferSkipName(data, size, QHEADERSZ_LOCAL);
+  if (offset + 4 <= size) {
+    return offset + 4;
+  }
+  return size + 1;
+}
+
+static void xferUdpHandle(int sockfd) {
+  uint8_t query[2048];
+  uint8_t response[2048];
+  ssize_t received = recv(sockfd, query, sizeof(query), 0);
+  size_t question_end;
+  size_t offset;
+  int ixfr_zone;
+
+  if (received < 12 || ((query[4] << 8) | query[5]) != 1) {
+    return;
+  }
+  question_end = xferQuestionEnd(query, (size_t)received);
+  if (question_end > (size_t)received) {
+    return;
+  }
+  ixfr_zone = question_end >= QHEADERSZ_LOCAL + sizeof(xfer_zone_ixfr) &&
+              memcmp(query + QHEADERSZ_LOCAL, xfer_zone_ixfr,
+                     sizeof(xfer_zone_ixfr)) == 0;
+  memcpy(response, query, 12);
+  response[2] = 0x84;
+  response[3] = 0x00;
+  writeU16(response + 4, 1);
+  writeU16(response + 6, 0);
+  memcpy(response + 12, query + 12, question_end - 12);
+  offset = 12 + (question_end - 12);
+  if (ixfr_zone) {
+    uint32_t serial = atomic_load_explicit(&xfer_last_serial,
+                                           memory_order_acquire) + 1;
+    writeU16(response + 8, 1);
+    writeU16(response + 10, 0);
+    memcpy(response + offset, xfer_zone_ixfr, sizeof(xfer_zone_ixfr));
+    offset += sizeof(xfer_zone_ixfr);
+    writeU16(response + offset, 6);
+    offset += 2;
+    writeU16(response + offset, 1);
+    offset += 2;
+    writeU32(response + offset, 300);
+    offset += 4;
+    writeU16(response + offset, 20);
+    offset += 2;
+    response[offset++] = 0;
+    response[offset++] = 0;
+    writeU32(response + offset, serial);
+    offset += 4;
+    writeU32(response + offset, 10800);
+    offset += 4;
+    writeU32(response + offset, 3600);
+    offset += 4;
+    writeU32(response + offset, 604800);
+    offset += 4;
+    writeU32(response + offset, 300);
+    offset += 4;
+  } else {
+    response[3] |= 0x04; /* NOTIMP: make xfrd use AXFR for this zone */
+    writeU16(response + 8, 0);
+    writeU16(response + 10, 0);
+  }
+  send(sockfd, response, offset, MSG_NOSIGNAL);
+}
+
+static void xferTcpHandle(int clientfd) {
+  uint8_t length[2];
+  uint8_t query[4096];
+  uint8_t *response;
+  size_t query_size;
+  size_t payload_size;
+  size_t rr_count;
+  size_t offset;
+  uint32_t last_serial;
+  int have_serial;
+
+  if (receiveAll(clientfd, length, sizeof(length)) == -1) {
+    goto done;
+  }
+  query_size = ((size_t)length[0] << 8) | length[1];
+  if (query_size < 12 || query_size > sizeof(query)) {
+    goto done;
+  }
+  if (receiveAll(clientfd, query, query_size) == -1) {
+    goto done;
+  }
+  payload_size = atomic_load_explicit(&xfer_payload_size, memory_order_acquire);
+  rr_count = xferCountRrs(xfer_payload, payload_size, &last_serial,
+                          &have_serial);
+  if (have_serial) {
+    atomic_store_explicit(&xfer_last_serial, last_serial, memory_order_release);
+  }
+  response = malloc(12 + (query_size - 12) + payload_size);
+  if (!response) {
+    goto done;
+  }
+  memcpy(response, query, 12);
+  response[2] = 0x84;
+  response[3] = 0x00;
+  writeU16(response + 4, 1);
+  writeU16(response + 6, (uint16_t)rr_count);
+  writeU16(response + 8, 0);
+  writeU16(response + 10, 0);
+  offset = 12;
+  memcpy(response + offset, query + 12, query_size - 12);
+  offset += query_size - 12;
+  memcpy(response + offset, xfer_payload, payload_size);
+  offset += payload_size;
+  length[0] = (uint8_t)(offset >> 8);
+  length[1] = (uint8_t)offset;
+  if (sendAll(clientfd, length, sizeof(length)) == 0) {
+    sendAll(clientfd, response, offset);
+  }
+  free(response);
+done:
+  close(clientfd);
+  atomic_fetch_add_explicit(&xfer_transfers_done, 1, memory_order_release);
+}
+
+static void *xferPrimaryThread(void *unused) {
+  struct sockaddr_in address;
+  int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+  int one = 1;
+
+  (void)unused;
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_port = htons(secondary_port);
+  inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+  if (udp_fd == -1 || tcp_fd == -1 ||
+      setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == -1 ||
+      bind(udp_fd, (struct sockaddr *)&address, sizeof(address)) == -1 ||
+      bind(tcp_fd, (struct sockaddr *)&address, sizeof(address)) == -1 ||
+      listen(tcp_fd, 8) == -1) {
+    fprintf(stderr, "fake primary listener failed on port %d\n",
+            secondary_port);
+    abort();
+  }
+  while (1) {
+    struct pollfd events[2];
+    int result;
+
+    events[0].fd = udp_fd;
+    events[0].events = POLLIN;
+    events[0].revents = 0;
+    events[1].fd = tcp_fd;
+    events[1].events = POLLIN;
+    events[1].revents = 0;
+    result = poll(events, 2, -1);
+    if (result <= 0) {
+      continue;
+    }
+    if (events[0].revents) {
+      xferUdpHandle(udp_fd);
+    }
+    if (events[1].revents) {
+      int client_fd = accept(tcp_fd, NULL, NULL);
+      if (client_fd != -1) {
+        xferTcpHandle(client_fd);
+      }
+    }
+  }
+  return NULL;
+}
+
+static const uint8_t xfer_notify_axfr[] = {
+    0x12, 0x34, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    9,  's',  'e',  'c',  'o',  'n',  'd',  'a',
+    'r', 'y',  7,  'e',  'x',  'a',  'm',  'p',
+    'l', 'e',  0,  0x00, 0x06, 0x00, 0x01};
+static const uint8_t xfer_notify_ixfr[] = {
+    0x12, 0x34, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    14, 's',  'e',  'c',  'o',  'n',  'd',  'a',
+    'r', 'y',  '-',  'i',  'x',  'f',  'r',  7,
+    'e', 'x',  'a',  'm',  'p',  'l',  'e',  0,
+    0x00, 0x06, 0x00, 0x01};
+
+static void fuzzSecondaryTransfer(const uint8_t *payload, size_t payload_size) {
+  const uint8_t *notify;
+  size_t notify_size;
+  size_t transfer_size;
+  uint64_t previous;
+  struct timespec started;
+  struct timespec pause = {0, 1000000L};
+  int sockfd;
+
+  if (payload_size < 2) {
+    return;
+  }
+  if (payload[0] & 1) {
+    notify = xfer_notify_ixfr;
+    notify_size = sizeof(xfer_notify_ixfr);
+  } else {
+    notify = xfer_notify_axfr;
+    notify_size = sizeof(xfer_notify_axfr);
+  }
+  transfer_size = payload_size - 1;
+  if (transfer_size > XFER_MAX_PAYLOAD) {
+    transfer_size = XFER_MAX_PAYLOAD;
+  }
+  memcpy(xfer_payload, payload + 1, transfer_size);
+  atomic_store_explicit(&xfer_payload_size, transfer_size,
+                        memory_order_release);
+  previous = atomic_load_explicit(&xfer_transfers_done, memory_order_acquire);
+  sockfd = connectTarget(0);
+  if (sockfd == -1) {
+    return;
+  }
+  sendPacket(sockfd, notify, notify_size, 0, 0, 0);
+  close(sockfd);
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  while (atomic_load_explicit(&xfer_transfers_done, memory_order_acquire) ==
+         previous) {
+    struct timespec now;
+    int64_t elapsed;
+
+    nanosleep(&pause, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed = (now.tv_sec - started.tv_sec) * 1000;
+    elapsed += (now.tv_nsec - started.tv_nsec) / 1000000;
+    if (elapsed >= XFER_TRANSFER_TIMEOUT_MS) {
+      break;
+    }
+  }
+}
+
 int fuzzServer(const uint8_t *data, size_t size) {
   const uint8_t *payload;
   size_t payload_size;
@@ -693,6 +997,11 @@ int fuzzServer(const uint8_t *data, size_t size) {
   prepend_proxy = proxyV2Enabled() && !raw_proxy;
   raw_tcp = use_tcp && ((flags & RAW_TCP_FLAG) || raw_proxy);
   use_tsig = !raw_tcp && !raw_proxy && (flags & TSIG_FLAG);
+
+  if (secondaryEnabled() && (flags & SECONDARY_FLAG)) {
+    fuzzSecondaryTransfer(payload, payload_size);
+    goto done;
+  }
 
   if (!use_multipacket && payload_size > 65535) {
     payload_size = 65535;
@@ -805,6 +1114,17 @@ void launchFuzzer(void) {
 
   if (getenv("NSD_FUZZ_DISABLE")) {
     return;
+  }
+  if (secondaryEnabled()) {
+    pthread_t primary_thread;
+
+    result = pthread_create(&primary_thread, NULL, xferPrimaryThread, NULL);
+    if (result != 0) {
+      fprintf(stderr, "could not start fake primary thread: %s\n",
+              strerror(result));
+      abort();
+    }
+    pthread_detach(primary_thread);
   }
   result = pthread_create(&thread, NULL, launchFuzzerThread, NULL);
   if (result != 0) {
