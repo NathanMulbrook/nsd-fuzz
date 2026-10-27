@@ -1,0 +1,1145 @@
+#include "fuzzer.h"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <poll.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "coverbridge/covbridge.h"
+
+#define TCP_FLAG 0x01
+#define MULTIPACKET_FLAG 0x02
+#define WAIT_FOR_RESPONSE_FLAG 0x04
+#define RAW_TCP_FLAG 0x08
+#define TSIG_FLAG 0x10
+#define RAW_PROXY_FLAG 0x20
+#define SECONDARY_FLAG 0x40
+#define QHEADERSZ_LOCAL 12
+#define XFER_TRANSFER_TIMEOUT_MS 2000
+#define MAX_PACKET_COUNT 64
+#define MAX_UDP_PACKET_SIZE 65507
+#define PROXY_V2_MAX_HEADER_SIZE 52
+#define RAW_CHUNK_DELAY_US 1000
+#define PROCESS_TIMEOUT_MS 1000
+#define MULTIPACKET_TIMEOUT_MS 3000
+#define FUZZ_RESPONSE_TIMEOUT_MS 20
+#define RESPONSE_TIMEOUT_MS 20
+#define STARTUP_RESPONSE_TIMEOUT_MS 500
+#define SOCKET_TIMEOUT_MS 100
+#define COVERBRIDGE_LAYOUT UINT64_C(0x4e534446555a5a01)
+#define TSIG_MAC_SIZE 32
+#define TSIG_FUDGE 300
+
+static const uint8_t tsig_key_name[] = {8, 'f', 'u', 'z', 'z', '-',
+                                        'k', 'e', 'y', 0};
+static const uint8_t tsig_algorithm[] = {11, 'h', 'm', 'a', 'c', '-', 's',
+                                         'h', 'a', '2', '5', '6', 0};
+static const uint8_t tsig_secret[] = "0123456789abcdef0123456789abcdef";
+
+static const char *target_ip = "127.0.0.1";
+static const char *target_ip6 = "::1";
+static int target_port = FUZZ_PORT;
+static int secondary_port = FUZZ_PORT + 1000;
+static int fuzzer_started = 0;
+#define XFER_MAX_PAYLOAD 65535
+static uint8_t xfer_payload[XFER_MAX_PAYLOAD + 1];
+static _Atomic size_t xfer_payload_size;
+static _Atomic uint64_t xfer_transfers_done;
+static _Atomic uint32_t xfer_last_serial;
+static const uint8_t xfer_zone_axfr[] = {9, 's', 'e', 'c', 'o', 'n', 'd', 'a',
+                                         'r', 'y', 7, 'e', 'x', 'a', 'm',
+                                         'p', 'l', 'e', 0};
+static const uint8_t xfer_zone_ixfr[] = {14, 's', 'e', 'c', 'o', 'n', 'd',
+                                         'a', 'r', 'y', '-', 'i', 'x', 'f',
+                                         'r', 7, 'e', 'x', 'a', 'm', 'p',
+                                         'l', 'e', 0};
+struct worker_sync {
+  _Atomic uint64_t packets_processed;
+  _Atomic int completion_pending;
+  _Atomic int parked;
+  sem_t release;
+};
+static struct worker_sync *worker_sync;
+static int worker_barrier_mode;
+static int worker_is_child_process;
+static cb_snapshot coverage_snapshot;
+static uint64_t coverage_run;
+static int coverage_initialized;
+static int coverage_reported;
+
+int LLVMFuzzerRunDriver(int *argc, char ***argv,
+                        int (*callback)(const uint8_t *, size_t));
+static int waitForResponse(int sockfd, int timeout_ms, int use_tcp);
+
+void fuzzerPacketProcessed(void) {
+  if (worker_sync) {
+    atomic_store_explicit(&worker_sync->completion_pending, 1,
+                          memory_order_release);
+    atomic_fetch_add_explicit(&worker_sync->packets_processed, 1,
+                              memory_order_release);
+  }
+}
+
+static uint64_t processedPacketCount(void) {
+  if (!worker_sync) {
+    return 0;
+  }
+  return atomic_load_explicit(&worker_sync->packets_processed,
+                              memory_order_acquire);
+}
+
+void fuzzerWorkerWait(void) {
+  int result;
+
+  if (!worker_barrier_mode || !worker_sync) {
+    return;
+  }
+  cb_producer_enable();
+  atomic_store_explicit(&worker_sync->parked, 1, memory_order_release);
+  do {
+    result = sem_wait(&worker_sync->release);
+  } while (result == -1 && errno == EINTR);
+  if (result == -1) {
+    _exit(1);
+  }
+  atomic_store_explicit(&worker_sync->parked, 0, memory_order_release);
+}
+
+void fuzzerWorkerCheckpoint(void) {
+  if (!worker_barrier_mode || !worker_sync) {
+    return;
+  }
+  if (atomic_exchange_explicit(&worker_sync->completion_pending, 0,
+                               memory_order_acq_rel)) {
+    fuzzerWorkerWait();
+  }
+}
+
+static void releaseWorker(void) {
+  struct timespec pause = {0, 1000000L};
+  int attempt;
+
+  if (!worker_barrier_mode) {
+    return;
+  }
+  for (attempt = 0; attempt < PROCESS_TIMEOUT_MS; attempt++) {
+    if (atomic_load_explicit(&worker_sync->parked, memory_order_acquire)) {
+      if (sem_post(&worker_sync->release) == -1) {
+        perror("fuzzer worker release");
+        abort();
+      }
+      return;
+    }
+    nanosleep(&pause, NULL);
+  }
+  fprintf(stderr, "fuzzer worker did not park\n");
+  abort();
+}
+
+static int waitForPacketProcessed(uint64_t previous_count) {
+  struct timespec started;
+  struct timespec pause = {0, 1000000L};
+
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  while (processedPacketCount() == previous_count ||
+         !atomic_load_explicit(&worker_sync->parked, memory_order_acquire)) {
+    struct timespec now;
+    int64_t elapsed;
+
+    nanosleep(&pause, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed = (now.tv_sec - started.tv_sec) * 1000;
+    elapsed += (now.tv_nsec - started.tv_nsec) / 1000000;
+    if (elapsed >= PROCESS_TIMEOUT_MS) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+int fuzzerInitialize(void) {
+  if (getenv("NSD_FUZZ_DISABLE") ||
+      (!getenv("NSD_FUZZ_COVERBRIDGE") &&
+       !getenv("NSD_FUZZ_SINGLE_PROCESS"))) {
+    return 0;
+  }
+  worker_sync = mmap(NULL, sizeof(*worker_sync), PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (worker_sync == MAP_FAILED) {
+    worker_sync = NULL;
+    return -1;
+  }
+  worker_barrier_mode = 1;
+  worker_is_child_process = getenv("NSD_FUZZ_COVERBRIDGE") &&
+                            !getenv("NSD_FUZZ_SINGLE_PROCESS");
+  atomic_init(&worker_sync->packets_processed, 0);
+  atomic_init(&worker_sync->completion_pending, 0);
+  atomic_init(&worker_sync->parked, 0);
+  if (!atomic_is_lock_free(&worker_sync->packets_processed) ||
+      !atomic_is_lock_free(&worker_sync->completion_pending) ||
+      !atomic_is_lock_free(&worker_sync->parked)) {
+    errno = ENOTSUP;
+    return -1;
+  }
+  if (sem_init(&worker_sync->release, worker_is_child_process, 0) == -1) {
+    return -1;
+  }
+  if (!worker_is_child_process) {
+    cb_producer_enable();
+  }
+  if (cb_init(COVERBRIDGE_LAYOUT) == -1) {
+    return -1;
+  }
+  coverage_initialized = 1;
+  fprintf(stderr, "CoverBridge: %u shared coverage sites\n", cb_slots());
+  return 0;
+}
+
+static void coverageBegin(void) {
+  cb_libfuzzer_clear();
+  if (cb_begin(++coverage_run) == -1) {
+    perror("CoverBridge begin");
+    abort();
+  }
+}
+
+static void coverageEnd(void) {
+  uint32_t active = 0;
+
+  if (worker_barrier_mode &&
+      !atomic_load_explicit(&worker_sync->parked, memory_order_acquire)) {
+    fprintf(stderr, "fuzzer worker was not parked at coverage boundary\n");
+    abort();
+  }
+  if (cb_end(&coverage_snapshot) == -1 ||
+      cb_libfuzzer_import(&coverage_snapshot, 0) == -1) {
+    perror("CoverBridge import");
+    abort();
+  }
+  if (!coverage_reported) {
+    for (uint32_t i = 0; i < coverage_snapshot.nslots; i++) {
+      if (coverage_snapshot.counts[i]) {
+        active++;
+      }
+    }
+    if (active) {
+      fprintf(stderr, "CoverBridge: imported %u active worker sites\n", active);
+      coverage_reported = 1;
+    }
+  }
+}
+
+static int connectTarget(int use_tcp) {
+  struct timeval timeout;
+  int use_ipv6 = getenv("NSD_FUZZ_IPV6") != NULL;
+  int family = use_ipv6 ? AF_INET6 : AF_INET;
+  int socket_type = use_tcp ? SOCK_STREAM : SOCK_DGRAM;
+  int sockfd = socket(family, socket_type, 0);
+  int one = 1;
+
+  if (sockfd == -1) {
+    return -1;
+  }
+
+  timeout.tv_sec = SOCKET_TIMEOUT_MS / 1000;
+  timeout.tv_usec = (SOCKET_TIMEOUT_MS % 1000) * 1000;
+  setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  if (use_tcp) {
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  }
+
+  if (use_ipv6) {
+    struct sockaddr_in6 target;
+
+    memset(&target, 0, sizeof(target));
+    target.sin6_family = AF_INET6;
+    target.sin6_port = htons(target_port);
+    inet_pton(AF_INET6, target_ip6, &target.sin6_addr);
+    if (connect(sockfd, (struct sockaddr *)&target, sizeof(target)) == -1) {
+      close(sockfd);
+      return -1;
+    }
+  } else {
+    struct sockaddr_in target;
+
+    memset(&target, 0, sizeof(target));
+    target.sin_family = AF_INET;
+    target.sin_port = htons(target_port);
+    inet_pton(AF_INET, target_ip, &target.sin_addr);
+    if (connect(sockfd, (struct sockaddr *)&target, sizeof(target)) == -1) {
+      close(sockfd);
+      return -1;
+    }
+  }
+  return sockfd;
+}
+
+static int sendAll(int sockfd, const uint8_t *data, size_t size) {
+  size_t sent = 0;
+
+  while (sent < size) {
+    ssize_t result = send(sockfd, data + sent, size - sent, MSG_NOSIGNAL);
+    if (result > 0) {
+      sent += (size_t)result;
+    } else if (result == -1 && errno == EINTR) {
+      continue;
+    } else {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static void writeU16(uint8_t *data, uint16_t value) {
+  data[0] = (uint8_t)(value >> 8);
+  data[1] = (uint8_t)value;
+}
+
+static void writeU32(uint8_t *data, uint32_t value) {
+  data[0] = (uint8_t)(value >> 24);
+  data[1] = (uint8_t)(value >> 16);
+  data[2] = (uint8_t)(value >> 8);
+  data[3] = (uint8_t)value;
+}
+
+static void writeU48(uint8_t *data, uint64_t value) {
+  data[0] = (uint8_t)(value >> 40);
+  data[1] = (uint8_t)(value >> 32);
+  data[2] = (uint8_t)(value >> 24);
+  data[3] = (uint8_t)(value >> 16);
+  data[4] = (uint8_t)(value >> 8);
+  data[5] = (uint8_t)value;
+}
+
+static int proxyV2Enabled(void) {
+  return getenv("NSD_FUZZ_PROXY_V2") != NULL;
+}
+
+static size_t makeProxyV2Header(uint8_t *header, int use_tcp) {
+  static const uint8_t signature[] = {0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d,
+                                      0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a};
+  int use_ipv6 = getenv("NSD_FUZZ_IPV6") != NULL;
+  size_t address_size = use_ipv6 ? 16 : 4;
+  size_t payload_size = address_size * 2 + 4;
+  size_t offset = 0;
+
+  memcpy(header + offset, signature, sizeof(signature));
+  offset += sizeof(signature);
+  header[offset++] = 0x21; /* Version 2, PROXY command. */
+  header[offset++] = (uint8_t)((use_ipv6 ? 0x20 : 0x10) |
+                               (use_tcp ? 0x01 : 0x02));
+  writeU16(header + offset, (uint16_t)payload_size);
+  offset += 2;
+  if (use_ipv6) {
+    inet_pton(AF_INET6, "2001:db8::1", header + offset);
+    offset += address_size;
+    inet_pton(AF_INET6, target_ip6, header + offset);
+  } else {
+    inet_pton(AF_INET, "192.0.2.1", header + offset);
+    offset += address_size;
+    inet_pton(AF_INET, target_ip, header + offset);
+  }
+  offset += address_size;
+  writeU16(header + offset, 40000);
+  offset += 2;
+  writeU16(header + offset, (uint16_t)target_port);
+  offset += 2;
+  return offset;
+}
+
+static int sendProxyV2Header(int sockfd, int use_tcp) {
+  uint8_t header[PROXY_V2_MAX_HEADER_SIZE];
+  size_t header_size = makeProxyV2Header(header, use_tcp);
+
+  return sendAll(sockfd, header, header_size);
+}
+
+static int signTsigPacket(const uint8_t *packet, size_t packet_size,
+                          size_t maximum_size, uint8_t **signed_packet,
+                          size_t *signed_size) {
+  const size_t variables_size = sizeof(tsig_key_name) + 2 + 4 +
+                                sizeof(tsig_algorithm) + 6 + 2 + 2 + 2;
+  const size_t rdata_size =
+      sizeof(tsig_algorithm) + 6 + 2 + 2 + TSIG_MAC_SIZE + 2 + 2 + 2;
+  const size_t record_size = sizeof(tsig_key_name) + 2 + 2 + 4 + 2 + rdata_size;
+  uint8_t timestamp[6];
+  uint8_t mac[TSIG_MAC_SIZE];
+  unsigned int mac_size = 0;
+  uint8_t *mac_input;
+  uint8_t *output;
+  uint16_t additional;
+  size_t offset;
+
+  *signed_packet = NULL;
+  *signed_size = packet_size;
+  if (packet_size < 12 || record_size > maximum_size ||
+      packet_size > maximum_size - record_size) {
+    return 0;
+  }
+  additional = ((uint16_t)packet[10] << 8) | packet[11];
+  if (additional == UINT16_MAX) {
+    return 0;
+  }
+
+  mac_input = malloc(packet_size + variables_size);
+  output = malloc(packet_size + record_size);
+  if (!mac_input || !output) {
+    free(mac_input);
+    free(output);
+    return 0;
+  }
+
+  writeU48(timestamp, (uint64_t)time(NULL));
+  memcpy(mac_input, packet, packet_size);
+  offset = packet_size;
+  memcpy(mac_input + offset, tsig_key_name, sizeof(tsig_key_name));
+  offset += sizeof(tsig_key_name);
+  writeU16(mac_input + offset, 255);
+  offset += 2;
+  writeU32(mac_input + offset, 0);
+  offset += 4;
+  memcpy(mac_input + offset, tsig_algorithm, sizeof(tsig_algorithm));
+  offset += sizeof(tsig_algorithm);
+  memcpy(mac_input + offset, timestamp, sizeof(timestamp));
+  offset += sizeof(timestamp);
+  writeU16(mac_input + offset, TSIG_FUDGE);
+  offset += 2;
+  writeU16(mac_input + offset, 0);
+  offset += 2;
+  writeU16(mac_input + offset, 0);
+  offset += 2;
+
+  if (!HMAC(EVP_sha256(), tsig_secret, sizeof(tsig_secret) - 1, mac_input,
+            offset, mac, &mac_size) ||
+      mac_size != TSIG_MAC_SIZE) {
+    free(mac_input);
+    free(output);
+    return 0;
+  }
+  free(mac_input);
+
+  memcpy(output, packet, packet_size);
+  writeU16(output + 10, additional + 1);
+  offset = packet_size;
+  memcpy(output + offset, tsig_key_name, sizeof(tsig_key_name));
+  offset += sizeof(tsig_key_name);
+  writeU16(output + offset, 250);
+  offset += 2;
+  writeU16(output + offset, 255);
+  offset += 2;
+  writeU32(output + offset, 0);
+  offset += 4;
+  writeU16(output + offset, (uint16_t)rdata_size);
+  offset += 2;
+  memcpy(output + offset, tsig_algorithm, sizeof(tsig_algorithm));
+  offset += sizeof(tsig_algorithm);
+  memcpy(output + offset, timestamp, sizeof(timestamp));
+  offset += sizeof(timestamp);
+  writeU16(output + offset, TSIG_FUDGE);
+  offset += 2;
+  writeU16(output + offset, TSIG_MAC_SIZE);
+  offset += 2;
+  memcpy(output + offset, mac, sizeof(mac));
+  offset += sizeof(mac);
+  output[offset++] = packet[0];
+  output[offset++] = packet[1];
+  writeU16(output + offset, 0);
+  offset += 2;
+  writeU16(output + offset, 0);
+  offset += 2;
+
+  *signed_packet = output;
+  *signed_size = offset;
+  return 1;
+}
+
+static int sendPacket(int sockfd, const uint8_t *data, size_t size,
+                      int use_tcp, int use_tsig, int prepend_proxy) {
+  uint8_t proxy_header[PROXY_V2_MAX_HEADER_SIZE];
+  uint8_t *signed_packet = NULL;
+  uint8_t *udp_packet = NULL;
+  size_t proxy_size = prepend_proxy ? makeProxyV2Header(proxy_header, 0) : 0;
+  size_t maximum_size = use_tcp ? 65535 : MAX_UDP_PACKET_SIZE - proxy_size;
+  uint8_t length[2];
+  uint64_t previous_count;
+  int result;
+
+  if (use_tsig && signTsigPacket(data, size, maximum_size, &signed_packet,
+                                 &size)) {
+    data = signed_packet;
+  }
+  if (size > 65535) {
+    free(signed_packet);
+    return -1;
+  }
+  if (!use_tcp && size > maximum_size) {
+    size = maximum_size;
+  }
+  previous_count = processedPacketCount();
+  if (!use_tcp) {
+    if (prepend_proxy) {
+      udp_packet = malloc(proxy_size + size);
+      if (!udp_packet) {
+        free(signed_packet);
+        return -1;
+      }
+      memcpy(udp_packet, proxy_header, proxy_size);
+      memcpy(udp_packet + proxy_size, data, size);
+      data = udp_packet;
+      size += proxy_size;
+    }
+    result = send(sockfd, data, size, MSG_NOSIGNAL) == (ssize_t)size ? 0 : -1;
+    if (result == 0) {
+      releaseWorker();
+      if (waitForPacketProcessed(previous_count) == -1) {
+        result = -1;
+      }
+    }
+    free(udp_packet);
+    free(signed_packet);
+    return result;
+  }
+
+  length[0] = (uint8_t)(size >> 8);
+  length[1] = (uint8_t)size;
+  if (sendAll(sockfd, length, sizeof(length)) == -1) {
+    free(signed_packet);
+    return -1;
+  }
+  result = sendAll(sockfd, data, size);
+  free(signed_packet);
+  return result;
+}
+
+static int receiveAll(int sockfd, uint8_t *data, size_t size) {
+  size_t received = 0;
+
+  while (received < size) {
+    ssize_t result = recv(sockfd, data + received, size - received, 0);
+    if (result > 0) {
+      received += (size_t)result;
+    } else if (result == -1 && errno == EINTR) {
+      continue;
+    } else {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int waitForResponse(int sockfd, int timeout_ms, int use_tcp) {
+  struct pollfd event = {.fd = sockfd, .events = POLLIN};
+  uint8_t response[4096];
+  uint8_t length[2];
+  size_t response_size;
+  int result;
+
+  do {
+    result = poll(&event, 1, timeout_ms);
+  } while (result == -1 && errno == EINTR);
+
+  if (result <= 0) {
+    return -1;
+  }
+  if (use_tcp) {
+    if (receiveAll(sockfd, length, sizeof(length)) == -1) {
+      return -1;
+    }
+    response_size = ((size_t)length[0] << 8) | length[1];
+    while (response_size > 0) {
+      size_t chunk = response_size < sizeof(response) ? response_size
+                                                      : sizeof(response);
+      if (receiveAll(sockfd, response, chunk) == -1) {
+        return -1;
+      }
+      response_size -= chunk;
+    }
+    return 0;
+  }
+  return recv(sockfd, response, sizeof(response), 0) > 0 ? 0 : -1;
+}
+
+static int sendMultipacketData(int sockfd, const uint8_t *data, size_t size,
+                               int use_tcp, int wait_for_response,
+                               int use_tsig, int prepend_proxy) {
+  struct timespec started;
+  size_t offset = 0;
+  size_t packet_count = 0;
+
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  while (offset < size && packet_count < MAX_PACKET_COUNT) {
+    struct timespec now;
+    size_t packet_size;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if ((now.tv_sec - started.tv_sec) * 1000 +
+            (now.tv_nsec - started.tv_nsec) / 1000000 >=
+        MULTIPACKET_TIMEOUT_MS) {
+      break;
+    }
+
+    if (size - offset < 2) {
+      break;
+    }
+    packet_size = ((size_t)data[offset] << 8) | data[offset + 1];
+    offset += 2;
+    if (packet_size > size - offset) {
+      break;
+    }
+    if (sendPacket(sockfd, data + offset, packet_size, use_tcp, use_tsig,
+                   prepend_proxy) == -1) {
+      return -1;
+    }
+    offset += packet_size;
+    packet_count++;
+
+    if (offset < size) {
+      if (wait_for_response) {
+        waitForResponse(sockfd, RESPONSE_TIMEOUT_MS, use_tcp);
+      }
+    }
+  }
+  return packet_count > 0 ? 0 : 1;
+}
+
+static int sendRawTcpData(int sockfd, const uint8_t *data, size_t size) {
+  return sendAll(sockfd, data, size);
+}
+
+static int sendRawTcpChunks(int sockfd, const uint8_t *data, size_t size) {
+  size_t offset = 0;
+  size_t chunk_count = 0;
+
+  while (offset < size && chunk_count < MAX_PACKET_COUNT) {
+    size_t chunk_size;
+
+    if (size - offset < 2) {
+      break;
+    }
+    chunk_size = ((size_t)data[offset] << 8) | data[offset + 1];
+    offset += 2;
+    if (chunk_size > size - offset) {
+      break;
+    }
+    if (sendAll(sockfd, data + offset, chunk_size) == -1) {
+      return -1;
+    }
+    offset += chunk_size;
+    chunk_count++;
+    if (offset < size) {
+      usleep(RAW_CHUNK_DELAY_US);
+    }
+  }
+  return chunk_count > 0 ? 0 : 1;
+}
+
+static void drainTcpConnection(int sockfd) {
+  struct timespec started;
+  uint8_t response[4096];
+
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  while (1) {
+    struct pollfd event = {.fd = sockfd, .events = POLLIN};
+    struct timespec now;
+    int64_t elapsed;
+    int result;
+
+    do {
+      result = poll(&event, 1, RESPONSE_TIMEOUT_MS);
+    } while (result == -1 && errno == EINTR);
+    if (result > 0) {
+      ssize_t received = recv(sockfd, response, sizeof(response), 0);
+      if (received == 0) {
+        return;
+      }
+      if (received < 0 && errno != EINTR) {
+        return;
+      }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed = (now.tv_sec - started.tv_sec) * 1000;
+    elapsed += (now.tv_nsec - started.tv_nsec) / 1000000;
+    if (elapsed >= PROCESS_TIMEOUT_MS) {
+      return;
+    }
+  }
+}
+
+static int secondaryEnabled(void) {
+  return getenv("NSD_FUZZ_SECONDARY") != NULL;
+}
+
+static size_t xferSkipName(const uint8_t *data, size_t size, size_t offset) {
+  while (offset < size) {
+    uint8_t length = data[offset];
+    if ((length & 0xC0) == 0xC0) {
+      return offset + 2 <= size ? offset + 2 : size + 1;
+    }
+    if (length == 0) {
+      return offset + 1;
+    }
+    offset += 1 + length;
+  }
+  return size + 1;
+}
+
+static size_t xferCountRrs(const uint8_t *data, size_t size,
+                           uint32_t *last_serial, int *have_serial) {
+  size_t offset = 0;
+  size_t count = 0;
+  *have_serial = 0;
+  *last_serial = 0;
+  while (offset < size) {
+    size_t rr_start;
+    uint16_t type;
+    uint16_t rdlen;
+    offset = xferSkipName(data, size, offset);
+    if (offset + 10 > size) {
+      break;
+    }
+    rr_start = offset;
+    type = ((uint16_t)data[offset] << 8) | data[offset + 1];
+    rdlen = ((uint16_t)data[offset + 8] << 8) | data[offset + 9];
+    if (offset + 10 + rdlen > size) {
+      break;
+    }
+    if (type == 6 && rdlen >= 10) {
+      size_t rpos = rr_start + 10;
+      size_t rend = rr_start + 10 + rdlen;
+      rpos = xferSkipName(data, rend, rpos);
+      rpos = xferSkipName(data, rend, rpos);
+      if (rpos + 4 <= rend) {
+        *last_serial = ((uint32_t)data[rpos] << 24) |
+                       ((uint32_t)data[rpos + 1] << 16) |
+                       ((uint32_t)data[rpos + 2] << 8) | data[rpos + 3];
+        *have_serial = 1;
+      }
+    }
+    offset = rr_start + 10 + rdlen;
+    count++;
+  }
+  return count;
+}
+
+static size_t xferQuestionEnd(const uint8_t *data, size_t size) {
+  size_t offset = xferSkipName(data, size, QHEADERSZ_LOCAL);
+  if (offset + 4 <= size) {
+    return offset + 4;
+  }
+  return size + 1;
+}
+
+static void xferUdpHandle(int sockfd) {
+  uint8_t query[2048];
+  uint8_t response[2048];
+  ssize_t received = recv(sockfd, query, sizeof(query), 0);
+  size_t question_end;
+  size_t offset;
+  int ixfr_zone;
+
+  if (received < 12 || ((query[4] << 8) | query[5]) != 1) {
+    return;
+  }
+  question_end = xferQuestionEnd(query, (size_t)received);
+  if (question_end > (size_t)received) {
+    return;
+  }
+  ixfr_zone = question_end >= QHEADERSZ_LOCAL + sizeof(xfer_zone_ixfr) &&
+              memcmp(query + QHEADERSZ_LOCAL, xfer_zone_ixfr,
+                     sizeof(xfer_zone_ixfr)) == 0;
+  memcpy(response, query, 12);
+  response[2] = 0x84;
+  response[3] = 0x00;
+  writeU16(response + 4, 1);
+  writeU16(response + 6, 0);
+  memcpy(response + 12, query + 12, question_end - 12);
+  offset = 12 + (question_end - 12);
+  if (ixfr_zone) {
+    uint32_t serial = atomic_load_explicit(&xfer_last_serial,
+                                           memory_order_acquire) + 1;
+    writeU16(response + 8, 1);
+    writeU16(response + 10, 0);
+    memcpy(response + offset, xfer_zone_ixfr, sizeof(xfer_zone_ixfr));
+    offset += sizeof(xfer_zone_ixfr);
+    writeU16(response + offset, 6);
+    offset += 2;
+    writeU16(response + offset, 1);
+    offset += 2;
+    writeU32(response + offset, 300);
+    offset += 4;
+    writeU16(response + offset, 20);
+    offset += 2;
+    response[offset++] = 0;
+    response[offset++] = 0;
+    writeU32(response + offset, serial);
+    offset += 4;
+    writeU32(response + offset, 10800);
+    offset += 4;
+    writeU32(response + offset, 3600);
+    offset += 4;
+    writeU32(response + offset, 604800);
+    offset += 4;
+    writeU32(response + offset, 300);
+    offset += 4;
+  } else {
+    response[3] |= 0x04; /* NOTIMP: make xfrd use AXFR for this zone */
+    writeU16(response + 8, 0);
+    writeU16(response + 10, 0);
+  }
+  send(sockfd, response, offset, MSG_NOSIGNAL);
+}
+
+static void xferTcpHandle(int clientfd) {
+  uint8_t length[2];
+  uint8_t query[4096];
+  uint8_t *response;
+  size_t query_size;
+  size_t payload_size;
+  size_t rr_count;
+  size_t offset;
+  uint32_t last_serial;
+  int have_serial;
+
+  if (receiveAll(clientfd, length, sizeof(length)) == -1) {
+    goto done;
+  }
+  query_size = ((size_t)length[0] << 8) | length[1];
+  if (query_size < 12 || query_size > sizeof(query)) {
+    goto done;
+  }
+  if (receiveAll(clientfd, query, query_size) == -1) {
+    goto done;
+  }
+  payload_size = atomic_load_explicit(&xfer_payload_size, memory_order_acquire);
+  rr_count = xferCountRrs(xfer_payload, payload_size, &last_serial,
+                          &have_serial);
+  if (have_serial) {
+    atomic_store_explicit(&xfer_last_serial, last_serial, memory_order_release);
+  }
+  response = malloc(12 + (query_size - 12) + payload_size);
+  if (!response) {
+    goto done;
+  }
+  memcpy(response, query, 12);
+  response[2] = 0x84;
+  response[3] = 0x00;
+  writeU16(response + 4, 1);
+  writeU16(response + 6, (uint16_t)rr_count);
+  writeU16(response + 8, 0);
+  writeU16(response + 10, 0);
+  offset = 12;
+  memcpy(response + offset, query + 12, query_size - 12);
+  offset += query_size - 12;
+  memcpy(response + offset, xfer_payload, payload_size);
+  offset += payload_size;
+  length[0] = (uint8_t)(offset >> 8);
+  length[1] = (uint8_t)offset;
+  if (sendAll(clientfd, length, sizeof(length)) == 0) {
+    sendAll(clientfd, response, offset);
+  }
+  free(response);
+done:
+  close(clientfd);
+  atomic_fetch_add_explicit(&xfer_transfers_done, 1, memory_order_release);
+}
+
+static void *xferPrimaryThread(void *unused) {
+  struct sockaddr_in address;
+  int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+  int one = 1;
+
+  (void)unused;
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_port = htons(secondary_port);
+  inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+  if (udp_fd == -1 || tcp_fd == -1 ||
+      setsockopt(tcp_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == -1 ||
+      bind(udp_fd, (struct sockaddr *)&address, sizeof(address)) == -1 ||
+      bind(tcp_fd, (struct sockaddr *)&address, sizeof(address)) == -1 ||
+      listen(tcp_fd, 8) == -1) {
+    fprintf(stderr, "fake primary listener failed on port %d\n",
+            secondary_port);
+    abort();
+  }
+  while (1) {
+    struct pollfd events[2];
+    int result;
+
+    events[0].fd = udp_fd;
+    events[0].events = POLLIN;
+    events[0].revents = 0;
+    events[1].fd = tcp_fd;
+    events[1].events = POLLIN;
+    events[1].revents = 0;
+    result = poll(events, 2, -1);
+    if (result <= 0) {
+      continue;
+    }
+    if (events[0].revents) {
+      xferUdpHandle(udp_fd);
+    }
+    if (events[1].revents) {
+      int client_fd = accept(tcp_fd, NULL, NULL);
+      if (client_fd != -1) {
+        xferTcpHandle(client_fd);
+      }
+    }
+  }
+  return NULL;
+}
+
+static const uint8_t xfer_notify_axfr[] = {
+    0x12, 0x34, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    9,  's',  'e',  'c',  'o',  'n',  'd',  'a',
+    'r', 'y',  7,  'e',  'x',  'a',  'm',  'p',
+    'l', 'e',  0,  0x00, 0x06, 0x00, 0x01};
+static const uint8_t xfer_notify_ixfr[] = {
+    0x12, 0x34, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    14, 's',  'e',  'c',  'o',  'n',  'd',  'a',
+    'r', 'y',  '-',  'i',  'x',  'f',  'r',  7,
+    'e', 'x',  'a',  'm',  'p',  'l',  'e',  0,
+    0x00, 0x06, 0x00, 0x01};
+
+static void fuzzSecondaryTransfer(const uint8_t *payload, size_t payload_size) {
+  const uint8_t *notify;
+  size_t notify_size;
+  size_t transfer_size;
+  uint64_t previous;
+  struct timespec started;
+  struct timespec pause = {0, 1000000L};
+  int sockfd;
+
+  if (payload_size < 2) {
+    return;
+  }
+  if (payload[0] & 1) {
+    notify = xfer_notify_ixfr;
+    notify_size = sizeof(xfer_notify_ixfr);
+  } else {
+    notify = xfer_notify_axfr;
+    notify_size = sizeof(xfer_notify_axfr);
+  }
+  transfer_size = payload_size - 1;
+  if (transfer_size > XFER_MAX_PAYLOAD) {
+    transfer_size = XFER_MAX_PAYLOAD;
+  }
+  memcpy(xfer_payload, payload + 1, transfer_size);
+  atomic_store_explicit(&xfer_payload_size, transfer_size,
+                        memory_order_release);
+  previous = atomic_load_explicit(&xfer_transfers_done, memory_order_acquire);
+  sockfd = connectTarget(0);
+  if (sockfd == -1) {
+    return;
+  }
+  sendPacket(sockfd, notify, notify_size, 0, 0, 0);
+  close(sockfd);
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  while (atomic_load_explicit(&xfer_transfers_done, memory_order_acquire) ==
+         previous) {
+    struct timespec now;
+    int64_t elapsed;
+
+    nanosleep(&pause, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    elapsed = (now.tv_sec - started.tv_sec) * 1000;
+    elapsed += (now.tv_nsec - started.tv_nsec) / 1000000;
+    if (elapsed >= XFER_TRANSFER_TIMEOUT_MS) {
+      break;
+    }
+  }
+}
+
+int fuzzServer(const uint8_t *data, size_t size) {
+  const uint8_t *payload;
+  size_t payload_size;
+  uint8_t flags;
+  int sockfd;
+  int send_result;
+  int use_tcp;
+  int use_multipacket;
+  int raw_tcp;
+  int raw_proxy;
+  int prepend_proxy;
+  int use_tsig;
+  uint64_t previous_count = 0;
+
+  coverageBegin();
+  if (size < 2) {
+    goto done;
+  }
+
+  flags = data[0];
+  payload = data + 1;
+  payload_size = size - 1;
+  use_tcp = flags & TCP_FLAG;
+  use_multipacket = flags & MULTIPACKET_FLAG;
+  raw_proxy = proxyV2Enabled() && (flags & RAW_PROXY_FLAG);
+  prepend_proxy = proxyV2Enabled() && !raw_proxy;
+  raw_tcp = use_tcp && ((flags & RAW_TCP_FLAG) || raw_proxy);
+  use_tsig = !raw_tcp && !raw_proxy && (flags & TSIG_FLAG);
+
+  if (secondaryEnabled() && (flags & SECONDARY_FLAG)) {
+    fuzzSecondaryTransfer(payload, payload_size);
+    goto done;
+  }
+
+  if (!use_multipacket && payload_size > 65535) {
+    payload_size = 65535;
+  }
+
+  sockfd = connectTarget(use_tcp);
+  if (sockfd == -1) {
+    goto done;
+  }
+  if (use_tcp) {
+    previous_count = processedPacketCount();
+    releaseWorker();
+    if (prepend_proxy && sendProxyV2Header(sockfd, 1) == -1) {
+      close(sockfd);
+      if (waitForPacketProcessed(previous_count) == -1) {
+        fprintf(stderr, "timed out after sending PROXYv2 header\n");
+        abort();
+      }
+      goto done;
+    }
+  }
+
+  if (raw_tcp && use_multipacket) {
+    send_result = sendRawTcpChunks(sockfd, payload, payload_size);
+    if (send_result == 1) {
+      sendRawTcpData(sockfd, payload, payload_size);
+    }
+  } else if (raw_tcp) {
+    sendRawTcpData(sockfd, payload, payload_size);
+  } else if (use_multipacket) {
+    send_result = sendMultipacketData(sockfd, payload, payload_size, use_tcp,
+                                      flags & WAIT_FOR_RESPONSE_FLAG,
+                                      use_tsig, prepend_proxy && !use_tcp);
+    if (send_result == 1) {
+      if (payload_size > 65535) {
+        payload_size = 65535;
+      }
+      sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig,
+                 prepend_proxy && !use_tcp);
+    }
+  } else {
+    sendPacket(sockfd, payload, payload_size, use_tcp, use_tsig,
+               prepend_proxy && !use_tcp);
+  }
+
+  if (use_tcp) {
+    shutdown(sockfd, SHUT_WR);
+    drainTcpConnection(sockfd);
+  } else {
+    waitForResponse(sockfd, FUZZ_RESPONSE_TIMEOUT_MS, 0);
+  }
+  close(sockfd);
+  if (use_tcp && waitForPacketProcessed(previous_count) == -1) {
+    fprintf(stderr, "timed out waiting for TCP worker completion\n");
+    abort();
+  }
+done:
+  coverageEnd();
+  return 0;
+}
+
+static int targetReady(void) {
+  static const uint8_t query[] = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01,
+                                  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                  0x00, 0x00, 0x02, 0x00, 0x01};
+  int sockfd = connectTarget(0);
+  int ready = 0;
+
+  if (sockfd != -1) {
+    if (sendPacket(sockfd, query, sizeof(query), 0, 0, proxyV2Enabled()) == 0 &&
+        waitForResponse(sockfd, STARTUP_RESPONSE_TIMEOUT_MS, 0) == 0) {
+      ready = 1;
+    }
+    close(sockfd);
+  }
+  return ready;
+}
+
+static void *launchFuzzerThread(void *unused) {
+  char *args[10];
+  char **args_pointer = args;
+  int args_size = 0;
+  int attempt = 0;
+
+  (void)unused;
+  while (!targetReady()) {
+    if (++attempt % 10 == 0) {
+      fprintf(stderr, "Waiting for NSD on port %d\n", target_port);
+    }
+    sleep(1);
+  }
+
+  args[args_size++] = "nsd-fuzzer";
+  args[args_size++] = "FuzzingCorpusDirectory";
+  args[args_size++] = "-max_len=131072";
+  args[args_size++] = "-len_control=20";
+  args[args_size++] = "-detect_leaks=0";
+  args[args_size++] = "-dict=FuzzingDictionary";
+  args[args_size++] = "-artifact_prefix=FuzzingArtifactDirectory/";
+  args[args_size++] = "-timeout=5";
+  args[args_size] = NULL;
+
+  LLVMFuzzerRunDriver(&args_size, &args_pointer, fuzzServer);
+  return NULL;
+}
+
+void launchFuzzer(void) {
+  pthread_t thread;
+  int result;
+
+  if (getenv("NSD_FUZZ_DISABLE")) {
+    return;
+  }
+  if (secondaryEnabled()) {
+    pthread_t primary_thread;
+
+    result = pthread_create(&primary_thread, NULL, xferPrimaryThread, NULL);
+    if (result != 0) {
+      fprintf(stderr, "could not start fake primary thread: %s\n",
+              strerror(result));
+      abort();
+    }
+    pthread_detach(primary_thread);
+  }
+  result = pthread_create(&thread, NULL, launchFuzzerThread, NULL);
+  if (result != 0) {
+    fprintf(stderr, "could not start fuzzer thread: %s\n", strerror(result));
+    abort();
+  }
+  fuzzer_started = 1;
+  pthread_detach(thread);
+}
+
+void fuzzerShutdown(void) {
+  if (fuzzer_started) {
+    _exit(0);
+  }
+  if (coverage_initialized) {
+    cb_snapshot_free(&coverage_snapshot);
+  }
+}

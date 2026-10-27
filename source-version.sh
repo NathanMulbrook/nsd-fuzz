@@ -1,0 +1,3 @@
+NSD_VERSION="${NSD_VERSION:-4.15.2}"
+NSD_SOURCE_SHA256="${NSD_SOURCE_SHA256:-bb4d57753c2cc2a641c92dab1021016d25fb4b972920bf4f0bbb8c40c1a9cce2}"
+NSD_SOURCE_URL="${NSD_SOURCE_URL:-https://nlnetlabs.nl/downloads/nsd/nsd-$NSD_VERSION.tar.gz}"
